@@ -83,15 +83,37 @@
 # loopback bridge. Auto-detected next to scribe-loopback-setup.sh if unset.
 # export SCRIBE_NAUDIO_DLL=""
 
+# The loopback exe emits the Windows render device's raw mix format, not the
+# s16le/16k/mono the transcriber needs -- scribe.sh resamples it with
+# `ffmpeg` before it reaches scribe-transcribe.py. These three describe that
+# raw format for ffmpeg's benefit; the defaults (32-bit float, 48kHz, stereo)
+# match the common Windows mix format, but a given device may differ -- check
+# with a live smoke test and override if the [them] transcript comes out
+# garbled. Path to the ffmpeg binary/executable itself is also overridable;
+# unset/PATH-resolved "ffmpeg" is the default. If ffmpeg isn't found, --teams
+# degrades gracefully to mic-only for the [them] stream (with a warning)
+# rather than ever feeding raw device-format audio to the transcriber.
+# export SCRIBE_LOOPBACK_FORMAT="f32le"
+# export SCRIBE_LOOPBACK_RATE="48000"
+# export SCRIBE_LOOPBACK_CHANNELS="2"
+# export SCRIBE_FFMPEG_BIN="ffmpeg"
+
 # --- Analyst + on-stop note -----------------------------------------------
 
 # Headless LLM CLI invoked (with the prompt on stdin) by both the live
 # analyst loop and the on-stop note generator. Must work non-interactively.
+# To pin a specific model/backend, bake it into the command itself, e.g.:
+#   export SCRIBE_LLM_CMD="claude -p --model <id>"
+# There is no separate per-meeting `start --model` flag: the analyst pane
+# and on-stop hook run as processes separate from `start`, so this env var
+# is the only place a model selection can be threaded through.
 # export SCRIBE_LLM_CMD="claude -p"
 
 # Seconds between analyst rolling-brief refreshes (read by the analyst pane
-# command in herdr-plugin.toml; also settable per-meeting via `start
-# --analyst-interval`).
+# command in herdr-plugin.toml). There is no per-meeting `start
+# --analyst-interval` flag -- the analyst pane is spawned by herdr as its
+# own process, not a child of `start`, so this env var is the only way to
+# set the cadence.
 # export SCRIBE_ANALYST_INTERVAL="60"
 
 # Command that prints OCR'd on-screen text to stdout, giving the analyst

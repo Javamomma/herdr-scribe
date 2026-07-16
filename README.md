@@ -26,7 +26,8 @@ Meeting recorders create a file you then have to store, protect, and delete. scr
 - herdr ≥ 0.7.0
 - A speech-to-text engine (default: [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper), `base.en`)
 - Linux or WSL2 with a working mic capture source (WSLg / PulseAudio)
-- Optional: Windows host for remote-participant loopback capture
+- Optional: Windows host for remote-participant loopback capture (also needs
+  `ffmpeg` on the machine running `scribe.sh`, to resample that stream)
 - A headless LLM command for the analyst / notes (configurable; default `claude -p`)
 
 ## Install
@@ -97,9 +98,13 @@ bash scribe.sh start --consent one-party --topic "Acme standup" --attendees "Ali
 # warning if it isn't built.
 bash scribe.sh start --consent one-party --teams
 
-# Skip the live analyst pane for this meeting, or change its cadence:
+# Skip the live analyst pane for this meeting:
 bash scribe.sh start --consent one-party --no-analyst
-bash scribe.sh start --consent one-party --analyst-interval 30
+
+# The analyst's refresh cadence and the LLM command it (and the on-stop note
+# generator) run are set via env, not a `start` flag -- see scribe.conf.example:
+#   export SCRIBE_ANALYST_INTERVAL="30"
+#   export SCRIBE_LLM_CMD="claude -p --model <id>"
 
 # Check what's running (prints the meeting id, or "none"):
 bash scribe.sh status
@@ -150,7 +155,14 @@ bash scribe.sh --doctor
 
 - `scribe-loopback-setup.sh` builds the Windows remote-participant loopback
   bridge (userland WASAPI via NAudio, compiled with the in-box `csc.exe`).
-  Wire the result in via `SCRIBE_LOOPBACK_EXE`.
+  Wire the result in via `SCRIBE_LOOPBACK_EXE`. The loopback exe emits the
+  render device's raw mix format, not the s16le/16k/mono the transcriber
+  needs, so `--teams` also requires `ffmpeg` on the machine running
+  `scribe.sh` to resample the `[them]` stream in flight (see
+  `SCRIBE_LOOPBACK_FORMAT`/`_RATE`/`_CHANNELS` in `scribe.conf.example` if a
+  device's mix format isn't the common 32-bit-float/48kHz/stereo default).
+  Missing `ffmpeg` degrades the same way as a missing exe: a warning and
+  mic-only.
 - `scribe-screen-setup.sh` wires up optional screen-OCR context for the
   analyst (needs a screenshot tool + `tesseract`). Wire the result in via
   `SCRIBE_SCREEN_OCR_CMD`.

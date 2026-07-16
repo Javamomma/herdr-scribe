@@ -463,6 +463,73 @@ def test_compose_capture_teams_missing_exe_warns_and_falls_back_to_mic_only(tmp_
     assert "--channel me" in result.stdout
 
 
+def test_compose_capture_teams_resamples_loopback_via_ffmpeg(tmp_path):
+    """The loopback exe emits the Windows render device's raw mix format
+    (often 32-bit float/48kHz/stereo), not the s16le/16k/mono the
+    transcriber hard-assumes. The [them] branch must interpose an ffmpeg
+    resample step -- reaching the worker only after being converted -- never
+    pipe the loopback exe's raw output straight into the transcriber."""
+    exe = tmp_path / "fake-loopback-exe"
+    exe.write_text("#!/usr/bin/env bash\necho fake-loopback\n")
+    exe.chmod(0o755)
+    env = compose_env(tmp_path, SCRIBE_TEAMS="1", SCRIBE_LOOPBACK_EXE=str(exe))
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert result.returncode == 0
+    out = result.stdout
+    assert "ffmpeg" in out
+    assert "-ar 16000" in out
+    assert "-ac 1" in out
+    assert "-f s16le" in out
+    assert "--channel them" in out
+    # the exe's raw output must flow through ffmpeg, not directly into the
+    # transcriber
+    exe_line = next(line for line in out.splitlines() if str(exe) in line)
+    assert "ffmpeg" in exe_line
+    assert "scribe-transcribe.py" not in exe_line.split("ffmpeg")[0]
+
+
+def test_compose_capture_teams_missing_ffmpeg_falls_back_to_mic_only(tmp_path):
+    """If ffmpeg isn't available to resample it, the [them] stream must be
+    dropped entirely (warn + mic-only) rather than ever handing the worker
+    raw device-format audio it can't interpret."""
+    exe = tmp_path / "fake-loopback-exe"
+    exe.write_text("#!/usr/bin/env bash\necho fake-loopback\n")
+    exe.chmod(0o755)
+    env = compose_env(
+        tmp_path,
+        SCRIBE_TEAMS="1",
+        SCRIBE_LOOPBACK_EXE=str(exe),
+        SCRIBE_FFMPEG_BIN=str(tmp_path / "no-such-ffmpeg"),
+    )
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert result.returncode == 0
+    assert "warning" in result.stderr.lower()
+    assert "ffmpeg" in result.stderr.lower()
+    assert "--channel them" not in result.stdout
+    assert "--channel me" in result.stdout
+
+
+def test_compose_capture_loopback_format_env_configurable(tmp_path):
+    """SCRIBE_LOOPBACK_FORMAT/_RATE/_CHANNELS override the assumed input
+    format ffmpeg is told to expect from the loopback exe."""
+    exe = tmp_path / "fake-loopback-exe"
+    exe.write_text("#!/usr/bin/env bash\necho fake-loopback\n")
+    exe.chmod(0o755)
+    env = compose_env(
+        tmp_path,
+        SCRIBE_TEAMS="1",
+        SCRIBE_LOOPBACK_EXE=str(exe),
+        SCRIBE_LOOPBACK_FORMAT="s24le",
+        SCRIBE_LOOPBACK_RATE="44100",
+        SCRIBE_LOOPBACK_CHANNELS="6",
+    )
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    out = result.stdout
+    assert "s24le" in out
+    assert "44100" in out
+    assert "-ac \"6\"" in out or "-ac 6" in out
+
+
 def test_compose_capture_source_is_env_configurable(tmp_path):
     """SCRIBE_CAPTURE_SOURCE overrides the mic capture source; the composed
     pipeline reflects it rather than a hardcoded device name."""
@@ -710,6 +777,48 @@ def test_notes_llm_failure_preserves_transcript_and_writes_error_marker(tmp_path
     assert not note.exists()
 
 
+def test_analyst_once_includes_screen_context_when_configured(tmp_path):
+    """When SCRIBE_SCREEN_OCR_CMD is set and runnable, its stdout is
+    captured and prepended to the analyst prompt ahead of the transcript
+    delta -- the stubbed LLM below just echoes back whatever prompt it
+    received, so its presence in the brief proves it reached the prompt."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("[me] hello world\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "BRIEF: %s" "$input"')
+    ocr = tmp_path / "ocr-stub.sh"
+    write_stub_hook(ocr, "echo SCREENTEXT")
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={"SCRIBE_LLM_CMD": str(llm), "SCRIBE_SCREEN_OCR_CMD": str(ocr)},
+    )
+    assert result.returncode == 0
+    brief = out.read_text()
+    assert "SCREENTEXT" in brief
+    assert "hello world" in brief
+
+
+def test_analyst_once_screen_ocr_failure_is_non_fatal(tmp_path):
+    """A failing/unresolvable SCRIBE_SCREEN_OCR_CMD must never abort the
+    tick -- the brief still gets written from transcript-only context."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("[me] hello world\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "BRIEF: %s" "$input"')
+    ocr = tmp_path / "ocr-stub.sh"
+    write_stub_hook(ocr, "exit 1")
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={"SCRIBE_LLM_CMD": str(llm), "SCRIBE_SCREEN_OCR_CMD": str(ocr)},
+    )
+    assert result.returncode == 0
+    assert "hello world" in out.read_text()
+
+
 def test_analyst_loop_exits_when_meeting_dir_disappears(tmp_path):
     """The main loop (no --analyst-once) must exit cleanly once the
     transcript's parent directory no longer exists (meeting stopped)."""
@@ -782,8 +891,12 @@ def test_manifest_panes_have_commands():
 
 
 def test_manifest_start_action_documents_option_flags():
-    """The start action documents all seven start-option flags (inferred
-    [[actions.options]] schema -- see t7-report.md for the schema caveat)."""
+    """The start action documents the five start-option flags (inferred
+    [[actions.options]] schema -- see the manifest's schema-note header for
+    the caveat). Analyst cadence and LLM/model selection are env-only
+    (SCRIBE_ANALYST_INTERVAL / SCRIBE_LLM_CMD) since the analyst pane and
+    on-stop hook run as separate processes `start` has no way to pass
+    per-invocation flags into -- see scribe.conf.example."""
     data = load_manifest()
     start = next(a for a in data["actions"] if a["id"] == "start")
     flags = {opt["flag"] for opt in start.get("options", [])}
@@ -793,8 +906,6 @@ def test_manifest_start_action_documents_option_flags():
         "--attendees",
         "--teams",
         "--no-analyst",
-        "--analyst-interval",
-        "--model",
     }
     assert flags == expected
 

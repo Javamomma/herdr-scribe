@@ -59,18 +59,12 @@ command = ["bash", "scribe.sh", "start"]
   required = false
   description = "Skip the live analyst pane / rolling-brief loop for this meeting."
 
-  [[actions.options]]
-  flag = "--analyst-interval"
-  type = "integer"
-  default = 60
-  required = false
-  description = "Seconds between analyst rolling-brief refreshes."
-
-  [[actions.options]]
-  flag = "--model"
-  type = "string"
-  required = false
-  description = "Backend-specific model/identifier override passed through to SCRIBE_LLM_CMD for this meeting."
+# Analyst cadence (SCRIBE_ANALYST_INTERVAL) and the LLM command/model used by
+# the analyst and notes (SCRIBE_LLM_CMD, e.g. "claude -p --model X") are set
+# via environment/scribe.conf, not per-meeting `start` flags -- both are
+# consumed by processes (the analyst pane, the on-stop hook) that `start`
+# spawns as separate processes and has no way to thread a per-invocation
+# value into. See scribe.conf.example.
 
 [[actions]]
 id = "stop"

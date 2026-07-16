@@ -31,8 +31,11 @@ Explicitly out of scope (belongs in a private downstream layer, reached via the
 ## Plugin surface
 
 - Actions: `start` (opts `--consent one-party|all-party`, `--topic`,
-  `--attendees`, `--teams`, `--no-analyst`, `--analyst-interval N`, `--model ID`),
-  `stop`, `status`, `abort`.
+  `--attendees`, `--teams`, `--no-analyst`), `stop`, `status`, `abort`. Analyst
+  cadence and the LLM command/model used by the analyst + notes are env-only
+  (`SCRIBE_ANALYST_INTERVAL`, `SCRIBE_LLM_CMD`) — both are consumed by
+  processes (the analyst pane, the on-stop hook) that run separately from
+  `start` and so can't receive a per-invocation flag from it.
 - Panes: a transcript pane and an analyst pane, opened on `start`.
 - Config via env / `scribe.conf`: capture source, STT model, output dir, loopback
   exe path (host-specific), analyst model + interval, `SCRIBE_ON_STOP` hook.

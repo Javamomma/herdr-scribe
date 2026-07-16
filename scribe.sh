@@ -88,9 +88,17 @@ clear_current_if_matches() {
 #
 # When SCRIBE_TEAMS=1 (set by `start --teams`) and SCRIBE_LOOPBACK_EXE points
 # at a file that exists, a second [them] stream is composed from the loopback
-# exe into its own scribe-transcribe.py --channel them. If teams is requested
-# but the exe is missing, a warning is printed to stderr and the pipeline
-# falls back to mic-only.
+# exe. The loopback exe emits the Windows render device's raw mix format
+# (commonly 32-bit float PCM at 48kHz stereo -- see scribe-loopback.cs), not
+# the s16le/16k/mono scribe-transcribe.py's FasterWhisperBackend hard-assumes
+# (the mic path only works today because `parec` above is told to produce
+# that format directly). So the [them] stream is resampled through `ffmpeg`
+# before it ever reaches the transcriber; the assumed input format is
+# env-overridable (SCRIBE_LOOPBACK_FORMAT/_RATE/_CHANNELS) in case a given
+# device's mix format differs from the common default. If teams is requested
+# but the exe is missing, OR the exe exists but ffmpeg isn't available to
+# resample it, a warning is printed to stderr and the pipeline falls back to
+# mic-only -- raw device-format audio is never handed to the worker.
 compose_capture() {
 	local id="${1:?}"
 	local dir transcript
@@ -109,7 +117,15 @@ compose_capture() {
 	if [[ "${SCRIBE_TEAMS:-0}" == "1" ]]; then
 		local exe="${SCRIBE_LOOPBACK_EXE:-}"
 		if [[ -n "$exe" && -e "$exe" ]]; then
-			lines+=("\"$exe\" | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel them${glossary_arg} &")
+			local ffmpeg_bin="${SCRIBE_FFMPEG_BIN:-ffmpeg}"
+			if command -v "$ffmpeg_bin" >/dev/null 2>&1; then
+				local in_fmt="${SCRIBE_LOOPBACK_FORMAT:-f32le}"
+				local in_rate="${SCRIBE_LOOPBACK_RATE:-48000}"
+				local in_channels="${SCRIBE_LOOPBACK_CHANNELS:-2}"
+				lines+=("\"$exe\" | \"$ffmpeg_bin\" -loglevel error -f \"$in_fmt\" -ar \"$in_rate\" -ac \"$in_channels\" -i pipe:0 -f s16le -ar 16000 -ac 1 pipe:1 | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel them${glossary_arg} &")
+			else
+				echo "warning: --teams requested but ffmpeg (${ffmpeg_bin}) was not found; cannot resample loopback audio to what the transcriber needs -- falling back to mic-only for the [them] stream" >&2
+			fi
 		else
 			echo "warning: --teams requested but SCRIBE_LOOPBACK_EXE not found (${exe:-<unset>}); falling back to mic-only" >&2
 		fi
@@ -167,7 +183,7 @@ doctor() {
 # Meeting lifecycle: start / status / abort / stop
 
 start() {
-	local consent="" topic="" attendees="" teams=0 no_analyst=0 analyst_interval=60 model=""
+	local consent="" topic="" attendees="" teams=0 no_analyst=0
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			--consent)
@@ -189,14 +205,6 @@ start() {
 			--no-analyst)
 				no_analyst=1
 				shift
-				;;
-			--analyst-interval)
-				analyst_interval="${2:-}"
-				shift 2
-				;;
-			--model)
-				model="${2:-}"
-				shift 2
 				;;
 			*)
 				echo "start: unknown option: $1" >&2
@@ -233,8 +241,6 @@ start() {
 		else
 			echo "analyst: on"
 		fi
-		echo "analyst_interval: $analyst_interval"
-		echo "model: $model"
 		echo "started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} > "$dir/meta"
 

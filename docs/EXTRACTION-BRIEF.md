@@ -1,9 +1,8 @@
 # herdr-scribe — Build & Extraction Brief
 
-For the implementing agent (personal Claude Code). Build the plugin described in
-`DESIGN.md` from scratch. A private, domain-specific ancestor of this tool
-exists; you may consult it for technique, but **copy nothing verbatim** and
-**never** carry over any identifier from the denylist in
+For the implementing agent. Build the plugin described in `DESIGN.md` from
+scratch, as a clean-room implementation: **copy nothing verbatim** from any
+other codebase, and **never** carry over any identifier from the denylist in
 `scripts/sanitization-gate.sh`. Build clean; the gate must pass before anything
 goes public.
 
@@ -75,5 +74,5 @@ goes public.
 ## Non-goals
 
 Any privilege/confidentiality/retention/legal-hold/matter/vault/document-
-generation behavior. Those live in a separate private layer that attaches via
-`SCRIBE_ON_STOP` and are never part of this repo.
+generation behavior. That belongs in an optional private downstream layer
+that attaches via `SCRIBE_ON_STOP`; it is never part of this repo.

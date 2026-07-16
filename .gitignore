@@ -5,6 +5,7 @@ glossary.txt
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Build artifacts (loopback exe, etc.)
 *.exe

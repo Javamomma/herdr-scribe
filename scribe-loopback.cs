@@ -38,8 +38,11 @@
 //   audio render (playback) device's WASAPI loopback stream — the standard,
 //   documented mechanism for "what you hear" capture on Windows. Buffer
 //   format/rate come from the device's mix format (typically 16/24/32-bit
-//   float PCM at 44.1/48kHz); scribe-transcribe.py's real (non-fake) STT
-//   backend is responsible for resampling to whatever its model expects.
+//   float PCM at 44.1/48kHz). This program does NOT resample -- it writes
+//   exactly what WASAPI hands it. scribe.sh's compose_capture() is what
+//   resamples this stream to s16le/16k/mono (via ffmpeg) before it ever
+//   reaches scribe-transcribe.py's STT backend, which hard-assumes that
+//   format and does no resampling of its own.
 using System;
 using System.IO;
 using System.Threading;

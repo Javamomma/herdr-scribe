@@ -13,6 +13,12 @@
 # transcript in the meeting's RAM dir and is destroyed with it on stop.
 # This script never writes anywhere else.
 #
+# Optional screen context: when SCRIBE_SCREEN_OCR_CMD is set and resolvable,
+# its stdout (OCR'd on-screen text -- see scribe-screen-setup.sh) is captured
+# fresh each tick and prepended to the prompt ahead of the transcript delta.
+# Best-effort only: a missing/failing OCR command never aborts the tick --
+# the brief just falls back to transcript-only context.
+#
 # Exits cleanly once the transcript's parent directory no longer exists
 # (the meeting has been stopped or aborted).
 #
@@ -61,9 +67,30 @@ transcript_size() {
 	fi
 }
 
-# Build the rolling-brief prompt fed to SCRIBE_LLM_CMD over stdin.
+# Best-effort capture of optional screen-OCR context (see
+# scribe-screen-setup.sh): if SCRIBE_SCREEN_OCR_CMD is unset or its command
+# isn't resolvable, print nothing. If it's set but fails at run time, that
+# failure is swallowed (`|| true`) -- screen context is a nice-to-have, never
+# a reason to fail a tick.
+capture_screen_context() {
+	local cmd="${SCRIBE_SCREEN_OCR_CMD:-}"
+	[[ -z "$cmd" ]] && return 0
+	command -v "${cmd%% *}" >/dev/null 2>&1 || return 0
+	bash -c "$cmd" 2>/dev/null || true
+}
+
+# Build the rolling-brief prompt fed to SCRIBE_LLM_CMD over stdin. When
+# screen context is available, it's prepended immediately ahead of the
+# transcript delta as "Screen context:\n<ocr>\n\n".
 build_prompt() {
-	local delta="$1"
+	local delta="$1" screen="${2:-}"
+	local screen_block=""
+	if [[ -n "$screen" ]]; then
+		screen_block="Screen context:
+$screen
+
+"
+	fi
 	cat <<PROMPT
 You are a live meeting analyst. Below is the newest slice of a running
 transcript. Produce a short rolling brief with exactly these four sections:
@@ -73,9 +100,10 @@ Commitments: anything anyone has committed to doing.
 Open-questions: unresolved questions raised.
 Watch: anything worth flagging or keeping an eye on.
 
-Base the brief only on the transcript delta below. Keep it terse.
+Base the brief only on the transcript delta below (and the screen context
+above it, if present). Keep it terse.
 
---- transcript delta ---
+${screen_block}--- transcript delta ---
 $delta
 PROMPT
 }
@@ -106,8 +134,9 @@ analyst_tick() {
 	fi
 
 	local llm_cmd="${SCRIBE_LLM_CMD:-claude -p}"
-	local prompt brief
-	prompt="$(build_prompt "$delta")"
+	local screen prompt brief
+	screen="$(capture_screen_context)"
+	prompt="$(build_prompt "$delta" "$screen")"
 	if brief="$(printf '%s' "$prompt" | bash -c "$llm_cmd" 2>/dev/null)"; then
 		printf '%s\n' "$brief" > "$out"
 	else
