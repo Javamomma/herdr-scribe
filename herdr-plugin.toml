@@ -1,4 +1,14 @@
-# herdr-scribe — plugin manifest (STARTER; the build fills in real command paths)
+# herdr-scribe — plugin manifest
+#
+# Schema note: herdr's plugin-manifest schema was not available while this
+# plugin was built (no live herdr instance to check against). The `actions`
+# table shape below is taken from the original starter manifest as-is; the
+# `panes` array-of-tables and each `[[actions.options]]` sub-array are this
+# author's best inference of a plausible, TOML-native way to express "panes
+# opened on an action" and "documented per-action flags" and have NOT been
+# validated against a real herdr build. A human should confirm both against
+# a live herdr before relying on them; if herdr doesn't recognize `panes` or
+# `options`, the four actions above them still parse and work standalone.
 id = "scribe"
 name = "Scribe"
 version = "0.1.0"
@@ -7,17 +17,68 @@ description = "Live, no-recording meeting transcription: mic (+ optional call lo
 platforms = ["linux"]   # WSL2 counts as linux; Windows host used only for optional loopback
 
 # --- Actions ---------------------------------------------------------------
+
 [[actions]]
 id = "start"
 title = "Scribe: start meeting"
 contexts = ["workspace"]
 command = ["bash", "scribe.sh", "start"]
+# Opens the transcript + analyst panes (see [[panes]] below), each scoped to
+# the meeting this action starts.
+
+  [[actions.options]]
+  flag = "--consent"
+  type = "enum"
+  choices = ["one-party", "all-party"]
+  required = true
+  description = "Recording-consent regime that applies to this call. Required — start refuses to run without it."
+
+  [[actions.options]]
+  flag = "--topic"
+  type = "string"
+  required = false
+  description = "Meeting topic/title. Used to build the meeting id (slugified) and recorded in meta."
+
+  [[actions.options]]
+  flag = "--attendees"
+  type = "string"
+  required = false
+  description = "Free-text attendee list (e.g. comma-separated names), recorded in meta."
+
+  [[actions.options]]
+  flag = "--teams"
+  type = "boolean"
+  default = false
+  required = false
+  description = "Also capture remote participants via the optional Windows loopback bridge (tags lines [them]). Falls back to mic-only with a warning if the bridge isn't built — see scribe-loopback-setup.sh and `scribe.sh --doctor`."
+
+  [[actions.options]]
+  flag = "--no-analyst"
+  type = "boolean"
+  default = false
+  required = false
+  description = "Skip the live analyst pane / rolling-brief loop for this meeting."
+
+  [[actions.options]]
+  flag = "--analyst-interval"
+  type = "integer"
+  default = 60
+  required = false
+  description = "Seconds between analyst rolling-brief refreshes."
+
+  [[actions.options]]
+  flag = "--model"
+  type = "string"
+  required = false
+  description = "Backend-specific model/identifier override passed through to SCRIBE_LLM_CMD for this meeting."
 
 [[actions]]
 id = "stop"
 title = "Scribe: stop + write note"
 contexts = ["workspace"]
 command = ["bash", "scribe.sh", "stop"]
+# Closes the transcript + analyst panes; writes the transcript to
+# SCRIBE_OUTPUT_DIR and runs the SCRIBE_ON_STOP hook (default: scribe-notes).
 
 [[actions]]
 id = "status"
@@ -30,7 +91,48 @@ id = "abort"
 title = "Scribe: abort (discard, no note)"
 contexts = ["workspace"]
 command = ["bash", "scribe.sh", "abort"]
+# Closes the transcript + analyst panes; discards the meeting, no note.
 
-# NOTE: pane definitions (transcript pane, analyst pane) and start-option flags
-# (--consent, --topic, --attendees, --teams, --no-analyst, --analyst-interval,
-# --model) are specified in docs/EXTRACTION-BRIEF.md and wired during the build.
+# --- Panes -------------------------------------------------------------
+# Both panes are scoped to the running meeting: they resolve the current
+# meeting's transcript/analyst-brief path at pane-open time via scribe.sh's
+# own resolver flags, so they always follow whichever meeting `start` most
+# recently began (herdr's single-meeting model — see docs/DESIGN.md).
+
+[[panes]]
+id = "transcript"
+title = "Scribe: transcript"
+contexts = ["workspace"]
+open_on = ["start"]
+close_on = ["stop", "abort"]
+command = ["bash", "-c", "tail -n +1 -f \"$(bash scribe.sh --current-transcript)\""]
+
+[[panes]]
+id = "analyst"
+title = "Scribe: analyst brief"
+contexts = ["workspace"]
+open_on = ["start"]
+close_on = ["stop", "abort"]
+# Disabled when `start --no-analyst` was used (herdr is expected to gate
+# pane-opening on the option value; if it can't, the pane will simply run
+# the analyst loop unconditionally — harmless, just an extra ephemeral tick).
+disabled_when = { flag = "--no-analyst" }
+command = [
+  "bash", "-c",
+  "T=\"$(bash scribe.sh --current-transcript)\"; A=\"$(bash scribe.sh --current-analyst)\"; bash scribe-analyst.sh \"$T\" \"$A\" --interval \"${SCRIBE_ANALYST_INTERVAL:-60}\" & tail -n +1 -f \"$A\""
+]
+
+# --- Optional host bridges (gated, degrade gracefully) ----------------------
+# Neither bridge is required. Run `scribe.sh --doctor` any time to see which
+# of them are currently available; missing bridges never break a meeting —
+# scribe just runs mic-only / transcript-only-context.
+#
+#   scribe-loopback-setup.sh   builds the Windows remote-participant loopback
+#                              exe (userland WASAPI via NAudio, in-box
+#                              csc.exe). Wire the result in via
+#                              SCRIBE_LOOPBACK_EXE. Windows-only; not built or
+#                              verified on this (Linux/WSL2) dev machine.
+#   scribe-screen-setup.sh     wires up optional screen-OCR context for the
+#                              analyst (needs a screenshot tool + tesseract
+#                              on this machine). Wire the result in via
+#                              SCRIBE_SCREEN_OCR_CMD.

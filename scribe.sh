@@ -123,6 +123,47 @@ compose_capture() {
 	printf '%s\n' "${lines[@]}"
 }
 
+# Pane path resolvers: used by herdr-plugin.toml's pane commands to find the
+# currently-running meeting's transcript / analyst-brief path, whatever its
+# id is. Not test-only (unlike the --validate-consent-style flags below) --
+# these back real plugin-surface behavior.
+current_transcript_path() {
+	local id
+	id="$(current_id)" || return 1
+	echo "$(ram_dir "$id")/transcript.md"
+}
+
+current_analyst_path() {
+	local id
+	id="$(current_id)" || return 1
+	echo "$(ram_dir "$id")/analyst.md"
+}
+
+# --doctor: report which optional host bridges (Windows remote-participant
+# loopback, screen-OCR) are currently available. Never errors -- a missing
+# bridge is normal, expected, and fully supported (mic-only / no-screen-
+# context); this only ever *reports*, it doesn't gate anything.
+doctor() {
+	echo "scribe doctor -- optional bridge availability"
+	echo ""
+
+	local loopback_exe="${SCRIBE_LOOPBACK_EXE:-}"
+	if [[ -n "$loopback_exe" && -e "$loopback_exe" ]]; then
+		echo "  loopback (remote-participant capture): available ($loopback_exe)"
+	else
+		echo "  loopback (remote-participant capture): not available -- set SCRIBE_LOOPBACK_EXE (see scribe-loopback-setup.sh); falls back to mic-only"
+	fi
+
+	local screen_cmd="${SCRIBE_SCREEN_OCR_CMD:-}"
+	if [[ -n "$screen_cmd" ]] && command -v "${screen_cmd%% *}" >/dev/null 2>&1; then
+		echo "  screen-ocr (screen context for analyst): available ($screen_cmd)"
+	else
+		echo "  screen-ocr (screen context for analyst): not available -- set SCRIBE_SCREEN_OCR_CMD (see scribe-screen-setup.sh); analyst runs without screen context"
+	fi
+
+	return 0
+}
+
 # Meeting lifecycle: start / status / abort / stop
 
 start() {
@@ -303,6 +344,18 @@ case "${1:-}" in
 		;;
 	--compose-capture)
 		compose_capture "${2:?}"
+		exit 0
+		;;
+	--current-transcript)
+		current_transcript_path || { echo "scribe.sh: no meeting running" >&2; exit 1; }
+		exit 0
+		;;
+	--current-analyst)
+		current_analyst_path || { echo "scribe.sh: no meeting running" >&2; exit 1; }
+		exit 0
+		;;
+	--doctor)
+		doctor
 		exit 0
 		;;
 esac

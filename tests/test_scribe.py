@@ -5,10 +5,13 @@ import subprocess
 import pathlib
 import tempfile
 import time
+import tomllib
 import pytest
 
 
 SCRIPT = str(pathlib.Path(__file__).resolve().parents[1] / "scribe.sh")
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+BASH = shutil.which("bash") or "/bin/bash"
 
 
 def run(args, env=None, stdin=""):
@@ -733,3 +736,186 @@ def test_analyst_loop_exits_when_meeting_dir_disappears(tmp_path):
         proc.wait()
         pytest.fail("scribe-analyst.sh loop did not exit after meeting dir was removed")
     assert proc.returncode == 0
+
+
+# Task 7: manifest (panes + flags) + optional bridges (gated) + --doctor
+
+MANIFEST = REPO_ROOT / "herdr-plugin.toml"
+LOOPBACK_SETUP = str(REPO_ROOT / "scribe-loopback-setup.sh")
+SCREEN_SETUP = str(REPO_ROOT / "scribe-screen-setup.sh")
+LOOPBACK_CS = REPO_ROOT / "scribe-loopback.cs"
+
+
+def load_manifest():
+    with open(MANIFEST, "rb") as f:
+        return tomllib.load(f)
+
+
+def test_manifest_parses_with_tomllib():
+    """herdr-plugin.toml must be valid TOML per Python's stdlib tomllib."""
+    data = load_manifest()
+    assert "actions" in data
+
+
+def test_manifest_has_four_actions():
+    """The manifest keeps exactly the four lifecycle actions."""
+    data = load_manifest()
+    ids = {a["id"] for a in data["actions"]}
+    assert ids == {"start", "stop", "status", "abort"}
+
+
+def test_manifest_has_two_panes():
+    """The manifest defines the transcript pane and the analyst pane."""
+    data = load_manifest()
+    assert "panes" in data
+    assert len(data["panes"]) == 2
+    pane_ids = {p["id"] for p in data["panes"]}
+    assert pane_ids == {"transcript", "analyst"}
+
+
+def test_manifest_panes_have_commands():
+    """Each pane carries a runnable command (list of argv tokens)."""
+    data = load_manifest()
+    for pane in data["panes"]:
+        assert isinstance(pane.get("command"), list)
+        assert len(pane["command"]) > 0
+
+
+def test_manifest_start_action_documents_option_flags():
+    """The start action documents all seven start-option flags (inferred
+    [[actions.options]] schema -- see t7-report.md for the schema caveat)."""
+    data = load_manifest()
+    start = next(a for a in data["actions"] if a["id"] == "start")
+    flags = {opt["flag"] for opt in start.get("options", [])}
+    expected = {
+        "--consent",
+        "--topic",
+        "--attendees",
+        "--teams",
+        "--no-analyst",
+        "--analyst-interval",
+        "--model",
+    }
+    assert flags == expected
+
+
+def test_manifest_no_denylisted_identifiers():
+    """Sanity check ahead of the full sanitization gate (Task 8): the
+    manifest itself must not smuggle in any host-specific absolute path."""
+    text = MANIFEST.read_text()
+    assert "/home/" not in text
+    assert "/Users/" not in text
+    assert "C:\\" not in text
+
+
+# --- scribe.sh --doctor ---
+
+def test_doctor_exits_zero_with_no_bridges_configured(tmp_path):
+    """--doctor never errors when both optional bridges are absent, and
+    names each bridge's availability in its report."""
+    result = run(
+        ["--doctor"],
+        env={"SCRIBE_LOOPBACK_EXE": "", "SCRIBE_SCREEN_OCR_CMD": ""},
+    )
+    assert result.returncode == 0
+    lowered = result.stdout.lower()
+    assert "loopback" in lowered
+    assert "screen" in lowered
+    assert "not available" in lowered
+
+
+def test_doctor_reports_loopback_available_when_exe_exists(tmp_path):
+    """A configured, existing SCRIBE_LOOPBACK_EXE is reported as available."""
+    exe = tmp_path / "fake-loopback-exe"
+    exe.write_text("#!/usr/bin/env bash\necho fake-loopback\n")
+    exe.chmod(0o755)
+    result = run(
+        ["--doctor"],
+        env={"SCRIBE_LOOPBACK_EXE": str(exe), "SCRIBE_SCREEN_OCR_CMD": ""},
+    )
+    assert result.returncode == 0
+    assert "loopback" in result.stdout.lower()
+    assert "available" in result.stdout.lower()
+    assert str(exe) in result.stdout
+
+
+def test_doctor_reports_screen_ocr_available_when_cmd_configured(tmp_path):
+    """A configured, resolvable SCRIBE_SCREEN_OCR_CMD is reported available."""
+    result = run(
+        ["--doctor"],
+        env={"SCRIBE_LOOPBACK_EXE": "", "SCRIBE_SCREEN_OCR_CMD": "true"},
+    )
+    assert result.returncode == 0
+    lowered = result.stdout.lower()
+    assert "screen" in lowered
+    assert "available" in lowered
+
+
+def test_doctor_never_errors_even_with_garbage_env(tmp_path):
+    """--doctor must exit 0 even when the configured bridge paths/commands
+    are nonsense -- it only ever reports, never fails."""
+    result = run(
+        ["--doctor"],
+        env={
+            "SCRIBE_LOOPBACK_EXE": str(tmp_path / "does-not-exist"),
+            "SCRIBE_SCREEN_OCR_CMD": "definitely-not-a-real-command-xyz",
+        },
+    )
+    assert result.returncode == 0
+
+
+# --- optional bridges: graceful degradation ---
+
+def test_loopback_setup_warns_and_exits_nonzero_without_csc(tmp_path):
+    """In a sandbox with no csc.exe, the loopback build must warn to stderr
+    and exit nonzero without touching/creating anything else."""
+    result = subprocess.run(
+        [BASH, LOOPBACK_SETUP, "--out", str(tmp_path / "scribe-loopback.exe")],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SCRIBE_CSC_EXE": str(tmp_path / "no-such-csc.exe")},
+    )
+    assert result.returncode != 0
+    assert "warning" in result.stderr.lower()
+    assert not (tmp_path / "scribe-loopback.exe").exists()
+
+
+def test_loopback_setup_missing_source_warns_and_exits_nonzero(tmp_path):
+    """If scribe-loopback.cs can't be found, warn + exit nonzero cleanly."""
+    fake_dir = tmp_path / "no-source-here"
+    fake_dir.mkdir()
+    shim = fake_dir / "scribe-loopback-setup.sh"
+    shim.write_text(pathlib.Path(LOOPBACK_SETUP).read_text())
+    shim.chmod(0o755)
+    result = subprocess.run(
+        [BASH, str(shim)], capture_output=True, text=True, env=os.environ.copy()
+    )
+    assert result.returncode != 0
+    assert "warning" in result.stderr.lower()
+
+
+def test_screen_setup_degrades_gracefully_without_ocr_tools(tmp_path):
+    """With no OCR/screenshot tools on PATH, the setup script warns, exits
+    nonzero, and does not write the wrapper it would otherwise generate."""
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    result = subprocess.run(
+        [BASH, SCREEN_SETUP],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(empty_bin)},
+    )
+    assert result.returncode != 0
+    assert "warning" in result.stderr.lower()
+    assert not (REPO_ROOT / "scribe-screen-ocr.sh").exists()
+
+
+def test_loopback_cs_is_marked_live_only_and_not_executed_by_tests():
+    """The C# loopback source exists, documents itself as Windows/live-only,
+    and mentions the NAudio dependency it's written against. It is never
+    compiled or run as part of this suite (no Windows/csc.exe here)."""
+    text = LOOPBACK_CS.read_text()
+    assert "WINDOWS-ONLY" in text or "Windows-only" in text
+    assert "LIVE-ONLY" in text or "live-only" in text.lower()
+    assert "NAudio" in text
+    assert "elevated" in text.lower() or "no elevated" in text.lower()
