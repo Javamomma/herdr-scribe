@@ -617,6 +617,96 @@ def test_analyst_once_llm_failure_is_non_fatal(tmp_path):
     assert result.stderr.strip() != ""  # failure is reported
 
 
+# Task 6: scribe-notes generic on-stop note generator (stubbed LLM)
+
+NOTES_SCRIPT = str(
+    pathlib.Path(__file__).resolve().parents[1] / "scribe-notes"
+)
+
+DENYLIST_WORDS = (
+    "privilege",
+    "confidential",
+    "retention",
+    "matter",
+    "litigation",
+    "vault",
+    "hold",
+)
+
+
+def run_notes(args, env=None, stdin=""):
+    """Run scribe-notes with args; return CompletedProcess."""
+    merged_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        ["bash", NOTES_SCRIPT, *args],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=merged_env,
+    )
+
+
+def test_notes_print_prompt_has_required_sections(tmp_path):
+    """--print-prompt emits a prompt naming Attendees/Decisions/Action Items,
+    without invoking any LLM command."""
+    t = tmp_path / "tx.md"
+    t.write_text("[me] hello\n[them] hi there\n")
+    result = run_notes(["--print-prompt", str(t)])
+    assert result.returncode == 0
+    assert "Attendees" in result.stdout
+    assert "Decisions" in result.stdout
+    assert "Action" in result.stdout
+
+
+def test_notes_print_prompt_has_no_privilege_framing(tmp_path):
+    """The generic prompt must carry NONE of the privilege/confidentiality/
+    retention/matter/litigation/vault/hold framing (case-insensitive)."""
+    t = tmp_path / "tx.md"
+    t.write_text("[me] hello\n")
+    result = run_notes(["--print-prompt", str(t)])
+    lowered = result.stdout.lower()
+    for word in DENYLIST_WORDS:
+        assert word not in lowered, f"denylisted word {word!r} found in prompt"
+
+
+def test_notes_writes_note_file_from_stub_llm(tmp_path):
+    """scribe-notes runs SCRIBE_LLM_CMD over the transcript and writes
+    <transcript-dir>/<stem>.note.md with the stub's output."""
+    t = tmp_path / "tx.md"
+    t.write_text("[me] hello world\n[them] second line\n")
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "NOTE: %s" "$input"')
+
+    result = run_notes([str(t)], env={"SCRIBE_LLM_CMD": str(llm)})
+    assert result.returncode == 0
+
+    note = tmp_path / "tx.note.md"
+    assert note.is_file()
+    content = note.read_text()
+    assert "NOTE:" in content
+    assert "hello world" in content
+    assert "second line" in content
+
+
+def test_notes_llm_failure_preserves_transcript_and_writes_error_marker(tmp_path):
+    """Fail-safe: a failing SCRIBE_LLM_CMD must not delete/alter the
+    transcript; a .note.error marker is written and scribe-notes exits
+    nonzero."""
+    t = tmp_path / "tx.md"
+    t.write_text("[me] hello\n")
+    llm = tmp_path / "failhook.sh"
+    write_stub_hook(llm, "exit 1")
+
+    result = run_notes([str(t)], env={"SCRIBE_LLM_CMD": str(llm)})
+    assert result.returncode != 0
+    assert t.is_file()  # transcript untouched
+    assert t.read_text() == "[me] hello\n"
+    error_marker = tmp_path / "tx.note.error"
+    assert error_marker.is_file()
+    note = tmp_path / "tx.note.md"
+    assert not note.exists()
+
+
 def test_analyst_loop_exits_when_meeting_dir_disappears(tmp_path):
     """The main loop (no --analyst-once) must exit cleanly once the
     transcript's parent directory no longer exists (meeting stopped)."""

@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# scribe-notes — generic on-stop meeting-note generator for herdr-scribe.
+#
+# Usage:
+#   scribe-notes <transcript-path>
+#   scribe-notes --print-prompt <transcript-path>   # emit prompt only (tests)
+#
+# Reads the transcript at <transcript-path>, composes a plain, generic
+# meeting-note prompt (Attendees / Decisions / an owner-attributed Action
+# Items table -- no privilege, confidentiality, retention, matter,
+# litigation, or vault framing of any kind), and runs it through
+# ${SCRIBE_LLM_CMD:-claude -p}. On success, writes the result to
+# <transcript-dir>/<stem>.note.md. On failure, the transcript is left
+# completely untouched, a <transcript-dir>/<stem>.note.error marker is
+# written instead, and this script exits nonzero -- a downstream LLM
+# failure can never lose the meeting record.
+set -euo pipefail
+
+usage() {
+	echo "usage: scribe-notes <transcript-path>" >&2
+	echo "       scribe-notes --print-prompt <transcript-path>" >&2
+}
+
+# Build the generic note-generation prompt fed to SCRIBE_LLM_CMD, with the
+# transcript content appended.
+build_prompt() {
+	local transcript_text="$1"
+	cat <<PROMPT
+You are a meeting note generator. Below is a meeting transcript. Produce a
+meeting note in markdown with exactly these sections:
+
+Attendees: who took part in the meeting.
+Decisions: what was decided.
+Action Items: a table with columns Owner | Action | Due (if mentioned).
+
+Base the note only on the transcript below. Be concise and factual.
+
+--- transcript ---
+$transcript_text
+PROMPT
+}
+
+note_path() {
+	local transcript="${1:?}"
+	local dir stem
+	dir="$(dirname "$transcript")"
+	stem="$(basename "$transcript")"
+	stem="${stem%.*}"
+	echo "$dir/$stem.note.md"
+}
+
+error_path() {
+	local transcript="${1:?}"
+	local dir stem
+	dir="$(dirname "$transcript")"
+	stem="$(basename "$transcript")"
+	stem="${stem%.*}"
+	echo "$dir/$stem.note.error"
+}
+
+# --- dispatch ---
+
+case "${1:-}" in
+	--print-prompt)
+		if [[ $# -lt 2 ]]; then
+			usage
+			exit 1
+		fi
+		transcript_text="$(cat "$2" 2>/dev/null || true)"
+		build_prompt "$transcript_text"
+		exit 0
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+esac
+
+TRANSCRIPT="${1:-}"
+if [[ -z "$TRANSCRIPT" ]]; then
+	usage
+	exit 1
+fi
+
+if [[ ! -f "$TRANSCRIPT" ]]; then
+	echo "scribe-notes: no such transcript: $TRANSCRIPT" >&2
+	exit 1
+fi
+
+TEXT="$(cat "$TRANSCRIPT")"
+PROMPT_BODY="$(build_prompt "$TEXT")"
+LLM_CMD="${SCRIBE_LLM_CMD:-claude -p}"
+OUT="$(note_path "$TRANSCRIPT")"
+ERR="$(error_path "$TRANSCRIPT")"
+
+# Fail-safe: the transcript is never touched below, on either path. On
+# success we write the note; on failure we write only an error marker
+# alongside it and exit nonzero -- nothing is ever deleted.
+if NOTE="$(printf '%s' "$PROMPT_BODY" | bash -c "$LLM_CMD" 2>/dev/null)"; then
+	printf '%s\n' "$NOTE" > "$OUT"
+	rm -f "$ERR"
+	exit 0
+else
+	echo "scribe-notes: note-generation command failed ($LLM_CMD); transcript preserved at $TRANSCRIPT" > "$ERR"
+	echo "scribe-notes: warning: note-generation failed; transcript preserved at $TRANSCRIPT" >&2
+	exit 1
+fi
