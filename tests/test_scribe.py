@@ -1,8 +1,10 @@
 import os
 import re
+import shutil
 import subprocess
 import pathlib
 import tempfile
+import time
 import pytest
 
 
@@ -483,3 +485,161 @@ def test_start_wires_compose_capture_by_default(tmp_path):
     ram_dir = tmp_path / "ram" / "scribe" / meeting_id
     assert (ram_dir / "transcript.md").is_file()
     assert (ram_dir / "capture.pid").is_file()
+
+
+# Task 5: scribe-analyst.sh (delta loop, stubbed LLM)
+
+ANALYST_SCRIPT = str(
+    pathlib.Path(__file__).resolve().parents[1] / "scribe-analyst.sh"
+)
+
+
+def run_analyst(args, env=None, stdin=""):
+    """Run scribe-analyst.sh with args; return CompletedProcess."""
+    merged_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        ["bash", ANALYST_SCRIPT, *args],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=merged_env,
+    )
+
+
+def test_analyst_once_writes_brief_and_offset(tmp_path):
+    """--analyst-once over a 2-line transcript writes a brief reflecting
+    those lines and creates <out>.offset."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("[me] hello world\n[them] second line\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "BRIEF: %s" "$input"')
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={"SCRIBE_LLM_CMD": str(llm)},
+    )
+    assert result.returncode == 0
+    assert out.is_file()
+    brief = out.read_text()
+    assert "hello world" in brief
+    assert "second line" in brief
+
+    offset_file = tmp_path / "brief.md.offset"
+    assert offset_file.is_file()
+    assert offset_file.read_text().strip() == str(len(transcript.read_bytes()))
+
+
+def test_analyst_once_no_new_lines_does_not_rewrite(tmp_path):
+    """A second --analyst-once with no new transcript content since the
+    last tick must not re-invoke the LLM or rewrite the brief."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("[me] hello world\n")
+    out = tmp_path / "brief.md"
+    calls = tmp_path / "calls.log"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(
+        llm, f'echo call >> "{calls}"; input="$(cat)"; printf "BRIEF: %s" "$input"'
+    )
+    env = {"SCRIBE_LLM_CMD": str(llm)}
+
+    first = run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    assert first.returncode == 0
+    first_brief = out.read_text()
+    assert calls.read_text().count("call") == 1
+
+    second = run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    assert second.returncode == 0
+    assert out.read_text() == first_brief  # brief unchanged
+    assert calls.read_text().count("call") == 1  # LLM not invoked again
+
+
+def test_analyst_once_empty_transcript_skips_llm(tmp_path):
+    """An empty transcript has no delta to analyze: the tick is a pure
+    no-op — the LLM is never invoked and neither the brief nor the offset
+    file is written (there's nothing new relative to the implicit 0
+    starting offset, so nothing to record)."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("")
+    out = tmp_path / "brief.md"
+    calls = tmp_path / "calls.log"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, f'echo call >> "{calls}"; cat')
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={"SCRIBE_LLM_CMD": str(llm)},
+    )
+    assert result.returncode == 0
+    assert not calls.exists()
+    assert not out.exists()
+    assert not (tmp_path / "brief.md.offset").exists()
+
+
+def test_analyst_once_delta_excludes_already_seen_lines(tmp_path):
+    """Each tick only sends the transcript content appended since the
+    previous tick's offset -- not the whole transcript again."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("[me] first line\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "BRIEF: %s" "$input"')
+    env = {"SCRIBE_LLM_CMD": str(llm)}
+
+    run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    assert "first line" in out.read_text()
+
+    with transcript.open("a") as f:
+        f.write("[them] second line\n")
+
+    run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    second_brief = out.read_text()
+    assert "second line" in second_brief
+    assert "first line" not in second_brief  # only the new delta is sent
+
+
+def test_analyst_once_llm_failure_is_non_fatal(tmp_path):
+    """A failing LLM command must not crash the tick; the offset still
+    advances and the failure is reported, but no partial brief is written."""
+    transcript = tmp_path / "transcript.md"
+    transcript.write_text("[me] hello\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, "exit 1")
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={"SCRIBE_LLM_CMD": str(llm)},
+    )
+    assert result.returncode == 0  # the tick itself doesn't crash
+    assert not out.exists()  # no brief written on failure
+    assert (tmp_path / "brief.md.offset").is_file()  # offset still advances
+    assert result.stderr.strip() != ""  # failure is reported
+
+
+def test_analyst_loop_exits_when_meeting_dir_disappears(tmp_path):
+    """The main loop (no --analyst-once) must exit cleanly once the
+    transcript's parent directory no longer exists (meeting stopped)."""
+    meeting_dir = tmp_path / "ram" / "scribe" / "abc"
+    meeting_dir.mkdir(parents=True)
+    transcript = meeting_dir / "transcript.md"
+    transcript.write_text("[me] hi\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, "cat")
+
+    proc = subprocess.Popen(
+        ["bash", ANALYST_SCRIPT, str(transcript), str(out), "--interval", "1"],
+        env={**os.environ, "SCRIBE_LLM_CMD": str(llm)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.3)
+    shutil.rmtree(meeting_dir)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("scribe-analyst.sh loop did not exit after meeting dir was removed")
+    assert proc.returncode == 0
