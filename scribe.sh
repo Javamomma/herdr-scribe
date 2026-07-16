@@ -77,6 +77,52 @@ clear_current_if_matches() {
 	fi
 }
 
+# Capture-pipeline composer: prints (never runs directly) the shell pipeline
+# that reads the system mic capture source and pipes raw PCM straight into
+# scribe-transcribe.py — no intermediate audio file, no redirect to one.
+#
+# Capture source is env-configurable via SCRIBE_CAPTURE_SOURCE (default the
+# neutral PulseAudio alias "@DEFAULT_SOURCE@", which resolves to whatever the
+# host's default recording source is — on WSL2 that's the WSLg PulseAudio
+# bridge. No machine-specific device name is ever hardcoded here.
+#
+# When SCRIBE_TEAMS=1 (set by `start --teams`) and SCRIBE_LOOPBACK_EXE points
+# at a file that exists, a second [them] stream is composed from the loopback
+# exe into its own scribe-transcribe.py --channel them. If teams is requested
+# but the exe is missing, a warning is printed to stderr and the pipeline
+# falls back to mic-only.
+compose_capture() {
+	local id="${1:?}"
+	local dir transcript
+	dir="$(ram_dir "$id")"
+	transcript="$dir/transcript.md"
+
+	local source="${SCRIBE_CAPTURE_SOURCE:-@DEFAULT_SOURCE@}"
+	local glossary_arg=""
+	if [[ -n "${SCRIBE_GLOSSARY:-}" ]]; then
+		glossary_arg=" --glossary \"${SCRIBE_GLOSSARY}\""
+	fi
+
+	local lines=()
+	lines+=("parec --raw --format=s16le --rate=16000 --channels=1 -d \"$source\" | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel me${glossary_arg} &")
+
+	if [[ "${SCRIBE_TEAMS:-0}" == "1" ]]; then
+		local exe="${SCRIBE_LOOPBACK_EXE:-}"
+		if [[ -n "$exe" && -e "$exe" ]]; then
+			lines+=("\"$exe\" | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel them${glossary_arg} &")
+		else
+			echo "warning: --teams requested but SCRIBE_LOOPBACK_EXE not found (${exe:-<unset>}); falling back to mic-only" >&2
+		fi
+	fi
+
+	lines+=("wait")
+
+	# If any backgrounded stream dies (or this process is killed), tear down
+	# the rest rather than leaving orphans writing into a since-deleted dir.
+	printf '%s\n' "trap 'kill \$(jobs -p) 2>/dev/null' TERM EXIT"
+	printf '%s\n' "${lines[@]}"
+}
+
 # Meeting lifecycle: start / status / abort / stop
 
 start() {
@@ -153,10 +199,17 @@ start() {
 
 	set_current "$id"
 
-	# Capture seam: the real mic(+loopback)->transcriber pipeline is composed
-	# in Task 4 (compose_capture). Here it's just a placeholder seam so tests
-	# can override it with SCRIBE_CAPTURE_CMD=true (no mic/model needed).
-	local capture_cmd="${SCRIBE_CAPTURE_CMD:-:}"
+	if [[ "$teams" -eq 1 ]]; then
+		export SCRIBE_TEAMS=1
+	fi
+
+	# Capture seam: by default, run the composed mic(+optional loopback)
+	# ->transcriber pipeline (compose_capture). Tests override this with
+	# SCRIBE_CAPTURE_CMD=true so no mic/model is ever needed.
+	local capture_cmd="${SCRIBE_CAPTURE_CMD:-}"
+	if [[ -z "$capture_cmd" ]]; then
+		capture_cmd="$(compose_capture "$id")"
+	fi
 	nohup bash -c "$capture_cmd" >/dev/null 2>&1 &
 	echo "$!" > "$dir/capture.pid"
 
@@ -246,6 +299,10 @@ case "${1:-}" in
 		;;
 	--out-dir)
 		out_dir
+		exit 0
+		;;
+	--compose-capture)
+		compose_capture "${2:?}"
 		exit 0
 		;;
 esac

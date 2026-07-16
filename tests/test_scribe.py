@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import pathlib
 import tempfile
@@ -380,3 +381,105 @@ def test_transcribe_source_never_writes_audio_file():
     assert "'ab'" not in src and '"ab"' not in src
     for ext in (".wav", ".mp3", ".pcm", ".flac", ".m4a", ".ogg"):
         assert ext not in src, f"audio extension literal {ext!r} found in worker source"
+
+
+# Task 4: capture-pipeline composer (no file write) + mic/loopback wiring
+
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".pcm", ".flac", ".m4a", ".ogg")
+
+
+def compose_env(tmp_path, **extra):
+    """Isolated RAM/output dirs for --compose-capture (no real mic/exe needed)."""
+    env = {
+        "SCRIBE_RAMROOT": str(tmp_path / "ram"),
+        "SCRIBE_OUTPUT_DIR": str(tmp_path / "out"),
+    }
+    env.update(extra)
+    return env
+
+
+def test_compose_capture_mic_pipeline_targets_transcribe_worker(tmp_path):
+    """--compose-capture <id> prints a pipeline feeding raw mic capture into
+    scribe-transcribe.py --channel me with the right transcript path."""
+    env = compose_env(tmp_path)
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert result.returncode == 0
+    out = result.stdout
+    assert "scribe-transcribe.py" in out
+    assert "--channel me" in out
+    transcript_path = str(tmp_path / "ram" / "scribe" / "meeting-abc" / "transcript.md")
+    assert transcript_path in out
+
+
+def test_compose_capture_never_writes_an_audio_file(tmp_path):
+    """Global Constraint: the composed pipeline pipes raw PCM straight into
+    the transcriber — no intermediate audio file, no redirect to one. (A
+    stderr-to-/dev/null redirect like `2>/dev/null` in cleanup plumbing is
+    fine; what's banned is any `>`/`>>` aimed at an audio-extension file.)"""
+    env = compose_env(tmp_path)
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    out = result.stdout
+    for ext in AUDIO_EXTENSIONS:
+        assert ext not in out, f"audio extension literal {ext!r} found in composed pipeline"
+    assert not re.search(r">>?\s*\S*\.(wav|mp3|pcm|flac|m4a|ogg)\b", out), (
+        "composed pipeline must never redirect to an audio file"
+    )
+
+
+def test_compose_capture_mic_only_when_teams_not_requested(tmp_path):
+    """Without --teams/SCRIBE_TEAMS, no [them] stream is composed."""
+    env = compose_env(tmp_path)
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert "--channel them" not in result.stdout
+
+
+def test_compose_capture_teams_adds_them_stream_when_loopback_exe_exists(tmp_path):
+    """SCRIBE_TEAMS=1 + an existing SCRIBE_LOOPBACK_EXE composes a second
+    [them] stream from the loopback exe into its own transcriber."""
+    exe = tmp_path / "fake-loopback-exe"
+    exe.write_text("#!/usr/bin/env bash\necho fake-loopback\n")
+    exe.chmod(0o755)
+    env = compose_env(tmp_path, SCRIBE_TEAMS="1", SCRIBE_LOOPBACK_EXE=str(exe))
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert result.returncode == 0
+    assert "--channel them" in result.stdout
+    assert str(exe) in result.stdout
+
+
+def test_compose_capture_teams_missing_exe_warns_and_falls_back_to_mic_only(tmp_path):
+    """Teams requested but SCRIBE_LOOPBACK_EXE missing: warn on stderr, no
+    [them] stream, mic-only output."""
+    missing_exe = tmp_path / "no-such-loopback-exe"
+    env = compose_env(tmp_path, SCRIBE_TEAMS="1", SCRIBE_LOOPBACK_EXE=str(missing_exe))
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert result.returncode == 0
+    assert "warning" in result.stderr.lower()
+    assert "--channel them" not in result.stdout
+    assert "--channel me" in result.stdout
+
+
+def test_compose_capture_source_is_env_configurable(tmp_path):
+    """SCRIBE_CAPTURE_SOURCE overrides the mic capture source; the composed
+    pipeline reflects it rather than a hardcoded device name."""
+    env = compose_env(tmp_path, SCRIBE_CAPTURE_SOURCE="some.custom.source")
+    result = run(["--compose-capture", "meeting-abc"], env=env)
+    assert "some.custom.source" in result.stdout
+
+
+def test_start_wires_compose_capture_by_default(tmp_path):
+    """start with no SCRIBE_CAPTURE_CMD override runs the composed capture
+    pipeline (not an inert no-op) as the meeting's capture process."""
+    env = {
+        "SCRIBE_RAMROOT": str(tmp_path / "ram"),
+        "SCRIBE_OUTPUT_DIR": str(tmp_path / "out"),
+        # Deliberately no SCRIBE_CAPTURE_CMD: exercise the real wiring.
+        # No real mic/parec is required for this to spawn+exit quickly since
+        # a nonexistent capture tool just fails inside the backgrounded
+        # subshell without affecting start()'s own exit code.
+    }
+    result = run(["start", "--consent", "one-party", "--topic", "Weekly Sync"], env=env)
+    assert result.returncode == 0
+    meeting_id = result.stdout.strip()
+    ram_dir = tmp_path / "ram" / "scribe" / meeting_id
+    assert (ram_dir / "transcript.md").is_file()
+    assert (ram_dir / "capture.pid").is_file()
