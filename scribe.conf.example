@@ -1,0 +1,107 @@
+# scribe.conf.example — copy to scribe.conf and edit for your machine.
+#
+#   cp scribe.conf.example scribe.conf
+#
+# scribe.sh auto-sources scribe.conf (next to itself) on every invocation, so
+# `scribe.sh start|stop|status|abort|--doctor` picks this up automatically.
+# scribe-analyst.sh, scribe-notes, and scribe-transcribe.py do NOT source this
+# file themselves — they only see these variables if they've been exported
+# into the environment already. The simplest way to make that true everywhere
+# (including herdr panes, which spawn scribe-analyst.sh directly) is to also
+# source this file from your shell profile (~/.bashrc / ~/.zshrc), e.g.:
+#
+#   [ -f /path/to/herdr-scribe/scribe.conf ] && source /path/to/herdr-scribe/scribe.conf
+#
+# Every variable below is optional; the default shown is what scribe uses if
+# you leave it unset/commented out. Nothing here may name a real user,
+# machine, or organization — keep overrides in your own untracked scribe.conf.
+
+# --- Storage locations -------------------------------------------------
+
+# RAM filesystem root under which the live (in-memory-backed) meeting
+# directory is created and destroyed. Must be a tmpfs/RAM-backed mount for
+# the no-recording guarantee to hold.
+# export SCRIBE_RAMROOT="/dev/shm"
+
+# Directory the finished transcript (<meeting-id>.md) is copied into on
+# `stop`. Created if missing.
+# export SCRIBE_OUTPUT_DIR="$PWD/meetings"
+
+# Path to this config file itself. Only useful if you keep scribe.conf
+# somewhere other than next to scribe.sh; scribe.sh sources
+# ${SCRIBE_CONF:-<script-dir>/scribe.conf} on every run.
+# export SCRIBE_CONF="/path/to/scribe.conf"
+
+# --- Speech-to-text -----------------------------------------------------
+
+# STT backend used by scribe-transcribe.py. "faster-whisper" streams real
+# audio through the faster-whisper model; "fake" treats each stdin line as
+# one already-recognized utterance (used by the test suite; needs no model,
+# mic, or network).
+# export SCRIBE_STT_BACKEND="faster-whisper"
+
+# Path to a hotword glossary file (one term per line, "#" comments allowed —
+# see glossary.txt.example) passed to the recognizer to bias it toward
+# expected names/terms (e.g. attendee names, project jargon).
+# export SCRIBE_GLOSSARY="/path/to/glossary.txt"
+
+# Emit extra diagnostics to stderr from scribe-transcribe.py (e.g. glossary
+# hotword count). Any non-empty value other than unset disables this; set to
+# "1" to enable.
+# export SCRIBE_DEBUG=""
+
+# --- Capture pipeline -----------------------------------------------------
+
+# PulseAudio recording source read for the mic ("[me]") stream. The default
+# "@DEFAULT_SOURCE@" alias resolves to whatever the host's default recording
+# source is (on WSL2, the WSLg PulseAudio bridge) — no device name is
+# hardcoded here.
+# export SCRIBE_CAPTURE_SOURCE="@DEFAULT_SOURCE@"
+
+# Advanced/test override: a full shell command string to run in place of the
+# normal composed mic(+optional loopback)->transcriber pipeline. Leave unset
+# for normal use; the test suite sets this to "true" so no mic is required.
+# export SCRIBE_CAPTURE_CMD=""
+
+# --- Remote-participant loopback (optional, Windows-host bridge) ---------
+
+# Set by `start --teams` (you shouldn't normally set this directly); when
+# "1", scribe also composes a second "[them]" stream from SCRIBE_LOOPBACK_EXE.
+# export SCRIBE_TEAMS="0"
+
+# Path to the built Windows remote-participant loopback exe (see
+# scribe-loopback-setup.sh). Unset/missing means mic-only — --teams then
+# degrades gracefully with a warning instead of failing.
+# export SCRIBE_LOOPBACK_EXE=""
+
+# Path to csc.exe (the in-box .NET Framework C# compiler), used only by
+# scribe-loopback-setup.sh to build the loopback bridge. Auto-detected on
+# PATH / a short list of well-known Windows locations if unset.
+# export SCRIBE_CSC_EXE=""
+
+# Path to NAudio.dll, used only by scribe-loopback-setup.sh to build the
+# loopback bridge. Auto-detected next to scribe-loopback-setup.sh if unset.
+# export SCRIBE_NAUDIO_DLL=""
+
+# --- Analyst + on-stop note -----------------------------------------------
+
+# Headless LLM CLI invoked (with the prompt on stdin) by both the live
+# analyst loop and the on-stop note generator. Must work non-interactively.
+# export SCRIBE_LLM_CMD="claude -p"
+
+# Seconds between analyst rolling-brief refreshes (read by the analyst pane
+# command in herdr-plugin.toml; also settable per-meeting via `start
+# --analyst-interval`).
+# export SCRIBE_ANALYST_INTERVAL="60"
+
+# Command that prints OCR'd on-screen text to stdout, giving the analyst
+# optional screen context (see scribe-screen-setup.sh). Unset means the
+# analyst runs on transcript-only context.
+# export SCRIBE_SCREEN_OCR_CMD=""
+
+# Command run on `stop` against the written-out transcript path:
+# `${SCRIBE_ON_STOP:-scribe-notes} <transcript-path>`. The default generates
+# a generic meeting note (attendees / decisions / action items). Point this
+# at your own downstream pipeline to extend what happens after a meeting
+# without touching the capture engine.
+# export SCRIBE_ON_STOP=""

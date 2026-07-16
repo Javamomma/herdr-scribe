@@ -1,0 +1,24 @@
+# glossary.txt.example — hotword glossary for the speech-to-text recognizer.
+#
+# Copy this file, fill in expected names/terms for your own meetings, and
+# point SCRIBE_GLOSSARY at your copy (see scribe.conf.example):
+#
+#   cp glossary.txt.example glossary.txt
+#   export SCRIBE_GLOSSARY="/path/to/glossary.txt"
+#
+# Format:
+#   - One hotword or phrase per line.
+#   - Blank lines are ignored.
+#   - Lines starting with "#" are comments and are ignored.
+#   - Order doesn't matter.
+#
+# What to put here: attendee names, project/product names, acronyms, or any
+# term the recognizer is likely to mishear or spell inconsistently — biasing
+# it toward these terms up front tends to work better than fixing typos in
+# the transcript after the fact.
+#
+# Example (uncomment/edit, or just add your own lines below):
+# Alice
+# Bob
+# Acme
+# Zephyr
