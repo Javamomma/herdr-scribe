@@ -298,3 +298,85 @@ def test_no_recording_ram_dir_contains_only_text_files(tmp_path):
     assert result.returncode == 0
     assert not ram_dir.exists()  # ram dir fully destroyed
     assert (tmp_path / "out" / f"{meeting_id}.md").is_file()  # out file exists
+
+
+# Task 3: scribe-transcribe.py streaming worker (pluggable STT backend)
+
+TRANSCRIBE_SCRIPT = str(
+    pathlib.Path(__file__).resolve().parents[1] / "scribe-transcribe.py"
+)
+
+
+def run_transcribe(args, env=None, stdin=""):
+    """Run scribe-transcribe.py with args; return CompletedProcess."""
+    merged_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        ["python3", TRANSCRIBE_SCRIPT, *args],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=merged_env,
+    )
+
+
+def test_transcribe_fake_tags(tmp_path):
+    """fake backend: each stdin line is one utterance, tagged with --channel."""
+    t = tmp_path / "tx.md"
+    result = run_transcribe(
+        ["--transcript", str(t), "--channel", "them"],
+        env={"SCRIBE_STT_BACKEND": "fake"},
+        stdin="hello world\nsecond line\n",
+    )
+    assert result.returncode == 0
+    lines = t.read_text().splitlines()
+    assert lines == ["[them] hello world", "[them] second line"]
+
+
+def test_transcribe_glossary_loaded(tmp_path):
+    """glossary file (# comments/blanks ignored) is loaded; fake backend
+    reports the hotword count on stderr when SCRIBE_DEBUG=1."""
+    g = tmp_path / "g.txt"
+    g.write_text("# c\nAcme\nZephyr\n")
+    t = tmp_path / "tx.md"
+    result = run_transcribe(
+        ["--transcript", str(t), "--glossary", str(g)],
+        env={"SCRIBE_STT_BACKEND": "fake", "SCRIBE_DEBUG": "1"},
+        stdin="x\n",
+    )
+    assert result.returncode == 0
+    assert "glossary:2" in result.stderr
+
+
+def test_transcribe_default_channel_is_me(tmp_path):
+    """When --channel is omitted, utterances are tagged [me]."""
+    t = tmp_path / "tx.md"
+    result = run_transcribe(
+        ["--transcript", str(t)],
+        env={"SCRIBE_STT_BACKEND": "fake"},
+        stdin="hi there\n",
+    )
+    assert result.returncode == 0
+    assert t.read_text().splitlines() == ["[me] hi there"]
+
+
+def test_transcribe_empty_stdin_empty_transcript(tmp_path):
+    """Empty stdin produces an empty (but existing) transcript, exit 0."""
+    t = tmp_path / "tx.md"
+    result = run_transcribe(
+        ["--transcript", str(t)],
+        env={"SCRIBE_STT_BACKEND": "fake"},
+        stdin="",
+    )
+    assert result.returncode == 0
+    assert t.read_text() == ""
+
+
+def test_transcribe_source_never_writes_audio_file():
+    """Global Constraint: never open an audio file for writing anywhere in
+    the worker source — no binary-write file opens ('wb'/'ab'), and no
+    audio-extension literal is ever paired with a write mode."""
+    src = pathlib.Path(TRANSCRIBE_SCRIPT).read_text()
+    assert "'wb'" not in src and '"wb"' not in src
+    assert "'ab'" not in src and '"ab"' not in src
+    for ext in (".wav", ".mp3", ".pcm", ".flac", ".m4a", ".ogg"):
+        assert ext not in src, f"audio extension literal {ext!r} found in worker source"
