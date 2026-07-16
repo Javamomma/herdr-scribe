@@ -1,0 +1,14 @@
+# Local config / secrets — never commit the real ones (ship .example templates)
+scribe.conf
+glossary.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Build artifacts (loopback exe, etc.)
+*.exe
+*.dll
+
+# Editor / OS
+.DS_Store
