@@ -107,11 +107,14 @@ def test_out_dir_default():
 # Task 2: meeting lifecycle (start/status/abort/stop) — no-recording guarantee
 
 def scribe_env(tmp_path, **extra):
-    """Isolated RAM/output dirs + stubbed capture command (no real mic)."""
+    """Isolated RAM/output dirs + stubbed capture command (no real mic).
+    SCRIBE_LLM_CMD is stubbed so the core note step never reaches for a
+    real model CLI inside the suite."""
     env = {
         "SCRIBE_RAMROOT": str(tmp_path / "ram"),
         "SCRIBE_OUTPUT_DIR": str(tmp_path / "out"),
         "SCRIBE_CAPTURE_CMD": "true",
+        "SCRIBE_LLM_CMD": "true",
     }
     env.update(extra)
     return env
@@ -1633,3 +1636,162 @@ def test_concurrent_deep_appends_do_not_interleave(tmp_path):
             continue
         assert not ("A" in line and "B" in line), "interleaved append detected"
         assert len(line) == 400
+
+
+# --- §5 post-note gate seam ---
+
+def read_audit(tmp_path):
+    audit = tmp_path / "out" / "scribe-audit.log"
+    return audit.read_text() if audit.exists() else ""
+
+
+def start_stop_meeting(tmp_path, env, transcript_text="[me] hello\n", stop_env=None):
+    started = run(["start", "--consent", "one-party", "--topic", "T"], env=env)
+    assert started.returncode == 0, started.stderr
+    meeting_id = started.stdout.strip()
+    ram_dir = tmp_path / "ram" / "scribe" / meeting_id
+    (ram_dir / "transcript.md").write_text(transcript_text)
+    stopped = run(["stop", meeting_id], env={**env, **(stop_env or {})})
+    return meeting_id, ram_dir, stopped
+
+
+def test_gate_clear_destroys_and_audits(tmp_path):
+    gate = tmp_path / "gate.sh"
+    write_stub_hook(gate, 'exit 0')
+    env = scribe_env(tmp_path, SCRIBE_GATE_CMD=str(gate))
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    assert not ram_dir.exists()
+    assert (tmp_path / "out" / f"{meeting_id}.md").is_file()
+    audit = read_audit(tmp_path)
+    assert meeting_id in audit
+    assert "\tclear\tdestroyed\t" in audit
+
+
+def test_gate_receives_note_path_and_live_meeting_dir(tmp_path):
+    """The gate runs AFTER the note is written and BEFORE destruction: its
+    $1 is the note, its $2 the still-existing meeting dir."""
+    seen = tmp_path / "gate-args.txt"
+    gate = tmp_path / "gate.sh"
+    write_stub_hook(
+        gate,
+        f'printf "%s\\n%s\\n" "$1" "$2" > "{seen}"; '
+        f'[ -f "$1" ] || exit 9; [ -d "$2" ] || exit 8; exit 0',
+    )
+    env = scribe_env(tmp_path, SCRIBE_GATE_CMD=str(gate))
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    lines = seen.read_text().splitlines()
+    assert lines[0].endswith(f"{meeting_id}.note.md")  # note, not transcript
+    assert lines[1] == str(ram_dir)
+    audit = read_audit(tmp_path)
+    assert "\tclear\t" in audit  # gate's [ -f/-d ] checks passed
+
+
+def test_gate_hold_quarantines_and_skips_hook(tmp_path):
+    hook_marker = tmp_path / "hook-ran"
+    hook = tmp_path / "hook.sh"
+    write_stub_hook(hook, f'touch "{hook_marker}"')
+    gate = tmp_path / "gate.sh"
+    write_stub_hook(gate, 'echo "needs review"; exit 75')
+    env = scribe_env(
+        tmp_path, SCRIBE_GATE_CMD=str(gate), SCRIBE_ON_STOP=str(hook)
+    )
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    # not destroyed: moved out of RAM into quarantine
+    assert not ram_dir.exists()
+    quarantined = tmp_path / "out" / "quarantine" / meeting_id
+    assert (quarantined / "transcript.md").is_file()
+    # transcript still written out
+    assert (tmp_path / "out" / f"{meeting_id}.md").is_file()
+    # audited with the gate's own message
+    audit = read_audit(tmp_path)
+    assert "\thold\t" in audit
+    assert "needs review" in audit
+    # downstream hook did NOT run on hold
+    assert not hook_marker.exists()
+
+
+def test_gate_crash_treated_as_hold(tmp_path):
+    gate = tmp_path / "gate.sh"
+    write_stub_hook(gate, 'echo boom >&2; exit 3')
+    env = scribe_env(tmp_path, SCRIBE_GATE_CMD=str(gate))
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    assert (tmp_path / "out" / "quarantine" / meeting_id).is_dir()
+    audit = read_audit(tmp_path)
+    assert "\thold\t" in audit
+    assert "treated as hold" in audit
+
+
+def test_gate_timeout_treated_as_hold(tmp_path):
+    gate = tmp_path / "gate.sh"
+    write_stub_hook(gate, 'sleep 30')
+    env = scribe_env(
+        tmp_path, SCRIBE_GATE_CMD=str(gate), SCRIBE_GATE_TIMEOUT="1"
+    )
+    started = time.time()
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    elapsed = time.time() - started
+    assert stopped.returncode == 0
+    assert elapsed < 20
+    assert (tmp_path / "out" / "quarantine" / meeting_id).is_dir()
+    assert "\thold\t" in read_audit(tmp_path)
+
+
+def test_gate_unconfigured_destroys_and_audits_as_today(tmp_path):
+    env = scribe_env(tmp_path)
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    assert not ram_dir.exists()
+    assert not (tmp_path / "out" / "quarantine").exists()
+    assert "\tno-gate\tdestroyed\t" in read_audit(tmp_path)
+
+
+def test_quarantine_path_never_lands_inside_ram_root(tmp_path):
+    """A misconfigured quarantine dir inside the RAM root is refused with a
+    warning and redirected to a durable location."""
+    gate = tmp_path / "gate.sh"
+    write_stub_hook(gate, 'exit 75')
+    env = scribe_env(
+        tmp_path,
+        SCRIBE_GATE_CMD=str(gate),
+        SCRIBE_QUARANTINE_DIR=str(tmp_path / "ram" / "evil-quarantine"),
+    )
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    assert "RAM root" in stopped.stderr
+    assert not (tmp_path / "ram" / "evil-quarantine").exists()
+    assert (tmp_path / "out" / "quarantine" / meeting_id).is_dir()
+
+
+def test_core_note_step_writes_note_before_gate_without_hook(tmp_path):
+    """Default flow (no SCRIBE_ON_STOP): core generates the note itself."""
+    note_llm = tmp_path / "llm.sh"
+    write_stub_hook(note_llm, 'cat >/dev/null; echo "Attendees: Alice"')
+    env = scribe_env(tmp_path, SCRIBE_LLM_CMD=str(note_llm))
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    note = tmp_path / "out" / f"{meeting_id}.note.md"
+    assert note.is_file()
+    assert "Attendees: Alice" in note.read_text()
+
+
+def test_legacy_on_stop_hook_still_owns_note_generation(tmp_path):
+    """SCRIBE_ON_STOP set (and no SCRIBE_NOTES_CMD) → core writes no note of
+    its own, exactly the pre-gate behavior."""
+    hook = tmp_path / "hook.sh"
+    write_stub_hook(hook, 'exit 0')
+    env = scribe_env(tmp_path, SCRIBE_ON_STOP=str(hook))
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    assert not (tmp_path / "out" / f"{meeting_id}.note.md").exists()
+
+
+def test_note_step_failure_is_nonfatal_and_transcript_preserved(tmp_path):
+    env = scribe_env(tmp_path, SCRIBE_NOTES_CMD="false")
+    meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
+    assert stopped.returncode == 0
+    assert "note generation failed" in stopped.stderr
+    assert (tmp_path / "out" / f"{meeting_id}.md").is_file()

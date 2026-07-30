@@ -413,15 +413,23 @@ deep_worker() {
 				done <<< "$files"
 
 				local llm_cmd="${SCRIBE_LLM_CMD_DEEP:-${SCRIBE_LLM_CMD:-claude -p}}"
-				local secs
+				local secs answer_file
 				secs="$(deep_timeout)"
-				if answer="$(run_with_timeout "$secs" bash -c "$llm_cmd" < "$scratch" 2>/dev/null)"; then
+				# Capture to a FILE, not a command substitution: a timed-out
+				# model command can leave orphaned grandchildren holding a
+				# substitution pipe open long after the timeout fired.
+				answer_file="$(mktemp "$(dirname "$out")/.deep-answer.XXXXXX")" || answer_file=""
+				if [[ -z "$answer_file" ]]; then
+					failed="could not create answer file"
+				elif run_with_timeout "$secs" bash -c "$llm_cmd" < "$scratch" > "$answer_file" 2>/dev/null; then
+					answer="$(cat "$answer_file" 2>/dev/null || true)"
 					if [[ -z "$(printf '%s' "$answer" | tr -d '[:space:]')" ]]; then
 						failed="retrieval command returned nothing"
 					fi
 				else
 					failed="retrieval failed or timed out (${secs}s) — command: $llm_cmd"
 				fi
+				rm -f "$answer_file" 2>/dev/null || true
 			fi
 		fi
 	fi
