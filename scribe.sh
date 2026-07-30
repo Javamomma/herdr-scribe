@@ -263,7 +263,13 @@ doctor() {
 	echo ""
 
 	echo "  capture backend: $(capture_backend) (SCRIBE_CAPTURE_BACKEND=${SCRIBE_CAPTURE_BACKEND:-auto})"
-	echo "  ram root: $RAMROOT$( [[ -d /dev/shm ]] || echo ' -- no tmpfs on this host; see scribe-ramdisk-macos.sh for a RAM-backed root' )"
+	local ram_note=""
+	case "$RAMROOT" in
+		"${TMPDIR:-/tmp}"|"${TMPDIR%/}"|/tmp)
+			ram_note=" -- NOT RAM-backed (no tmpfs on this host); see scribe-ramdisk-macos.sh"
+			;;
+	esac
+	echo "  ram root: $RAMROOT$ram_note"
 
 	local loopback_exe="${SCRIBE_LOOPBACK_EXE:-}"
 	if [[ -n "$loopback_exe" && -e "$loopback_exe" ]]; then

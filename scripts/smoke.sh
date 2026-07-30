@@ -79,11 +79,10 @@ These cannot be automated here. Do each and confirm the expected result.
         set SCRIBE_LOOPBACK_EXE, start with --teams, confirm remote audio appears
         as [them] lines AND is intelligible (validates the ffmpeg resample —
         the format contract is unverified until this passes).
- [ ] 7. herdr integration: install as a plugin in a REAL herdr, confirm the
-        manifest loads and the transcript + analyst panes open on start / close
-        on stop. If herdr rejects the `panes`/`actions.options` schema, adjust
-        herdr-plugin.toml to herdr's actual schema (it was inferred — see the
-        note at the top of that file).
+ [ ] 7. herdr integration: `herdr plugin link <repo>` (or install), then
+        `herdr plugin action invoke start --plugin scribe` — the transcript +
+        analyst panes open; `... invoke stop` writes the note and closes them.
+        (Manifest schema validated against herdr 0.7.3.)
  [ ] 8. Human diff review of the whole repo.
 
 Only when 1-8 pass: flip the repo public, then add the GitHub topic

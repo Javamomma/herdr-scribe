@@ -49,24 +49,42 @@ surface.
 
 ### 1. Install
 
-Install the plugin as above, or clone this repo and add it as a herdr plugin
-directory directly — see `docs/DESIGN.md` for the manifest herdr reads
-(`herdr-plugin.toml`).
-
-### 2. Bind a key
-
-Bind herdr keys (or menu entries) to the four actions in your herdr config,
-e.g. (illustrative — match herdr's own binding syntax):
+From the marketplace / GitHub:
 
 ```
-scribe.start  -> <leader>ss
-scribe.stop   -> <leader>se
-scribe.status -> <leader>s?
-scribe.abort  -> <leader>sx
+herdr plugin install <owner>/herdr-scribe
 ```
 
-Once bound, `start` opens the transcript pane and (unless `--no-analyst`) the
-analyst pane; both close automatically on `stop`/`abort`.
+or for development, clone and link your working copy:
+
+```
+herdr plugin link /path/to/herdr-scribe
+```
+
+The manifest is validated against herdr 0.7.3; `herdr plugin list` should
+show the `scribe` plugin with five actions and three pane entrypoints.
+
+### 2. Invoke the actions
+
+Run actions from herdr's action menu, the CLI, or a key you bind yourself
+(herdr 0.7 does not bind keys from plugin manifests — add bindings to
+`~/.config/herdr/config.toml` and `herdr server reload-config`):
+
+```
+herdr plugin action invoke start  --plugin scribe
+herdr plugin action invoke stop   --plugin scribe
+herdr plugin action invoke status --plugin scribe   # output: herdr plugin log list --plugin scribe
+herdr plugin action invoke abort  --plugin scribe
+herdr plugin action invoke artifacts --plugin scribe
+```
+
+`start` opens the transcript pane and (unless `SCRIBE_NO_ANALYST=1`) the
+analyst pane; `stop`/`abort` close them, and `stop` opens the artifact
+review pane when artifacts are enabled. herdr actions can't prompt for
+flags, so `start` reads its parameters from the environment:
+`SCRIBE_DEFAULT_CONSENT` (required — start refuses without an explicit
+consent regime) plus optional `SCRIBE_DEFAULT_TOPIC` / `_SCOPE` /
+`_ATTENDEES`. The full-flag CLI below works in any terminal regardless.
 
 ### 3. Configure
 

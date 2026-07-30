@@ -16,3 +16,6 @@ __pycache__/
 
 # Default output tree (transcripts, notes, sidecars, drafts, audit log)
 meetings/
+
+# Local tooling
+.venv/

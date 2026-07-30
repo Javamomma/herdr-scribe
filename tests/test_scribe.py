@@ -873,50 +873,44 @@ def test_manifest_parses_with_tomllib():
     assert "actions" in data
 
 
-def test_manifest_has_four_actions():
-    """The manifest keeps exactly the four lifecycle actions."""
+def test_manifest_has_five_actions():
+    """The manifest keeps the four lifecycle actions plus artifact review."""
     data = load_manifest()
     ids = {a["id"] for a in data["actions"]}
-    assert ids == {"start", "stop", "status", "abort"}
+    assert ids == {"start", "stop", "status", "abort", "artifacts"}
 
 
-def test_manifest_has_three_panes():
-    """The manifest defines the transcript, analyst, and artifact-review
-    panes."""
+def test_manifest_actions_point_at_executable_wrappers():
+    """herdr 0.7 actions cannot prompt for flags, so every action runs a
+    wrapper script under herdr/ (validated against a real herdr 0.7.3)."""
     data = load_manifest()
-    assert "panes" in data
-    assert len(data["panes"]) == 3
+    for action in data["actions"]:
+        cmd = action["command"]
+        assert cmd[0] == "bash"
+        wrapper = REPO_ROOT / cmd[1]
+        assert wrapper.is_file(), cmd[1]
+        assert os.access(wrapper, os.X_OK), cmd[1]
+
+
+def test_manifest_actions_have_no_options_subtables():
+    """[[actions.options]] was our own invention; real herdr 0.7 has no such
+    schema — start defaults come from the environment instead."""
+    data = load_manifest()
+    for action in data["actions"]:
+        assert "options" not in action
+
+
+def test_manifest_has_three_pane_entrypoints():
+    """Pane entrypoints (real 0.7.3 schema: id/title/placement/command; no
+    declarative open_on/close_on — the wrappers open them imperatively)."""
+    data = load_manifest()
     pane_ids = {p["id"] for p in data["panes"]}
     assert pane_ids == {"transcript", "analyst", "artifacts"}
-
-
-def test_manifest_panes_have_commands():
-    """Each pane carries a runnable command (list of argv tokens)."""
-    data = load_manifest()
     for pane in data["panes"]:
-        assert isinstance(pane.get("command"), list)
-        assert len(pane["command"]) > 0
-
-
-def test_manifest_start_action_documents_option_flags():
-    """The start action documents the five start-option flags (inferred
-    [[actions.options]] schema -- see the manifest's schema-note header for
-    the caveat). Analyst cadence and LLM/model selection are env-only
-    (SCRIBE_ANALYST_INTERVAL / SCRIBE_LLM_CMD) since the analyst pane and
-    on-stop hook run as separate processes `start` has no way to pass
-    per-invocation flags into -- see scribe.conf.example."""
-    data = load_manifest()
-    start = next(a for a in data["actions"] if a["id"] == "start")
-    flags = {opt["flag"] for opt in start.get("options", [])}
-    expected = {
-        "--consent",
-        "--topic",
-        "--attendees",
-        "--scope",
-        "--teams",
-        "--no-analyst",
-    }
-    assert flags == expected
+        assert pane["placement"] in ("split", "overlay", "zoomed", "tab")
+        assert isinstance(pane["command"], list) and pane["command"]
+        for stale_key in ("open_on", "close_on", "disabled_when", "contexts"):
+            assert stale_key not in pane
 
 
 def test_manifest_no_denylisted_identifiers():
