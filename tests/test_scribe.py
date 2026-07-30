@@ -904,6 +904,7 @@ def test_manifest_start_action_documents_option_flags():
         "--consent",
         "--topic",
         "--attendees",
+        "--scope",
         "--teams",
         "--no-analyst",
     }
@@ -1030,3 +1031,131 @@ def test_loopback_cs_is_marked_live_only_and_not_executed_by_tests():
     assert "LIVE-ONLY" in text or "live-only" in text.lower()
     assert "NAudio" in text
     assert "elevated" in text.lower() or "no elevated" in text.lower()
+
+
+# --- §3 per-meeting glossary injection ---
+
+def test_derive_hotwords_merges_scope_attendees_topic_deduped(tmp_path):
+    """Scope glossary + attendees + topic, comment/blank lines stripped,
+    order-preserving de-dup (Alice appears in both sources → once)."""
+    scope_dir = tmp_path / "scopes" / "acme-standup"
+    scope_dir.mkdir(parents=True)
+    (scope_dir / "glossary.txt").write_text("# jargon\nWidgetCo\n\nAlice\n")
+    result = run(
+        ["--derive-hotwords", "acme-standup", "Weekly Sync", "Alice, Bob"],
+        env={"SCRIBE_SCOPE_ROOT": str(tmp_path / "scopes")},
+    )
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["WidgetCo", "Alice", "Bob", "Weekly Sync"]
+
+
+def test_derive_hotwords_without_scope_root_uses_meeting_args_only(tmp_path):
+    """No SCRIBE_SCOPE_ROOT configured → only attendees/topic terms."""
+    result = run(
+        ["--derive-hotwords", "acme", "Kickoff", "Carol"],
+        env={"SCRIBE_SCOPE_ROOT": ""},
+    )
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["Carol", "Kickoff"]
+
+
+def test_validate_scope_accepts_plain_names_rejects_paths():
+    assert run(["--validate-scope", "acme-standup"]).returncode == 0
+    assert run(["--validate-scope", "proj.x_1"]).returncode == 0
+    for bad in ("../evil", "a/b", "", ".hidden", "a..b"):
+        assert run(["--validate-scope", bad]).returncode != 0, bad
+
+
+def test_start_rejects_path_scope(tmp_path):
+    env = scribe_env(tmp_path)
+    result = run(
+        ["start", "--consent", "one-party", "--scope", "../evil"], env=env
+    )
+    assert result.returncode != 0
+    assert "scope" in result.stderr.lower()
+
+
+def test_start_with_scope_writes_hotwords_and_global_file_is_byte_unchanged(tmp_path):
+    """Inline per-meeting terms land in the RAM dir; the reviewed global
+    glossary file is never mutated by a start that injected terms."""
+    global_glossary = tmp_path / "glossary.txt"
+    global_glossary.write_text("GlobalTerm\n# reviewed by a human\n")
+    scope_dir = tmp_path / "scopes" / "proj-x"
+    scope_dir.mkdir(parents=True)
+    (scope_dir / "glossary.txt").write_text("ScopeTerm\n")
+    before = global_glossary.read_bytes()
+
+    env = scribe_env(
+        tmp_path,
+        SCRIBE_GLOSSARY=str(global_glossary),
+        SCRIBE_SCOPE_ROOT=str(tmp_path / "scopes"),
+    )
+    result = run(
+        ["start", "--consent", "one-party", "--scope", "proj-x",
+         "--topic", "Kickoff", "--attendees", "Alice"],
+        env=env,
+    )
+    assert result.returncode == 0
+    meeting_id = result.stdout.strip()
+    hotwords = tmp_path / "ram" / "scribe" / meeting_id / "hotwords.txt"
+    assert hotwords.read_text().splitlines() == ["ScopeTerm", "Alice", "Kickoff"]
+    assert global_glossary.read_bytes() == before
+    run(["abort"], env=env)
+
+
+def test_start_without_scope_writes_no_hotwords_file(tmp_path):
+    """No scope supplied → global file only; no per-meeting injection."""
+    env = scribe_env(tmp_path)
+    result = run(
+        ["start", "--consent", "one-party", "--topic", "T", "--attendees", "A"],
+        env=env,
+    )
+    assert result.returncode == 0
+    meeting_id = result.stdout.strip()
+    assert not (tmp_path / "ram" / "scribe" / meeting_id / "hotwords.txt").exists()
+    run(["abort"], env=env)
+
+
+def test_start_scope_glossary_disabled_by_env(tmp_path):
+    """SCRIBE_MEETING_GLOSSARY=0 turns per-meeting injection off."""
+    env = scribe_env(tmp_path, SCRIBE_MEETING_GLOSSARY="0")
+    result = run(
+        ["start", "--consent", "one-party", "--scope", "proj-x", "--topic", "T"],
+        env=env,
+    )
+    assert result.returncode == 0
+    meeting_id = result.stdout.strip()
+    assert not (tmp_path / "ram" / "scribe" / meeting_id / "hotwords.txt").exists()
+    run(["abort"], env=env)
+
+
+def test_compose_capture_passes_glossary_extra_only_when_hotwords_exist(tmp_path):
+    ram = tmp_path / "ram"
+    meeting_dir = ram / "scribe" / "m1"
+    meeting_dir.mkdir(parents=True)
+    env = {"SCRIBE_RAMROOT": str(ram)}
+
+    without = run(["--compose-capture", "m1"], env=env)
+    assert "--glossary-extra" not in without.stdout
+
+    (meeting_dir / "hotwords.txt").write_text("Term\n")
+    with_hotwords = run(["--compose-capture", "m1"], env=env)
+    assert "--glossary-extra" in with_hotwords.stdout
+    assert "hotwords.txt" in with_hotwords.stdout
+
+
+def test_transcribe_glossary_extra_is_additive_and_deduped(tmp_path):
+    """Inline terms reach the recognizer additively; duplicates collapse."""
+    global_glossary = tmp_path / "g.txt"
+    global_glossary.write_text("Alice\nBob\n")
+    extra = tmp_path / "extra.txt"
+    extra.write_text("Bob\nCarol\n")
+    transcript = tmp_path / "t.md"
+    result = run_transcribe(
+        ["--transcript", str(transcript), "--glossary", str(global_glossary),
+         "--glossary-extra", str(extra)],
+        env={"SCRIBE_STT_BACKEND": "fake", "SCRIBE_DEBUG": "1"},
+        stdin="",
+    )
+    assert result.returncode == 0
+    assert "glossary:3" in result.stderr

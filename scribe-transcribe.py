@@ -138,9 +138,21 @@ def main(argv=None):
     parser.add_argument("--transcript", required=True, help="path to append transcript lines to")
     parser.add_argument("--channel", default="me", help="channel tag, e.g. me|them (default: me)")
     parser.add_argument("--glossary", default=None, help="path to a hotword glossary file")
+    parser.add_argument(
+        "--glossary-extra",
+        default=None,
+        help=(
+            "path to an additional per-meeting hotword file; terms are "
+            "additive on top of --glossary and de-duplicated"
+        ),
+    )
     args = parser.parse_args(argv)
 
-    hotwords = load_glossary(args.glossary)
+    hotwords = list(
+        dict.fromkeys(
+            [*load_glossary(args.glossary), *load_glossary(args.glossary_extra)]
+        )
+    )
     backend_name = os.environ.get("SCRIBE_STT_BACKEND", "faster-whisper")
     backend = make_backend(backend_name, hotwords)
 

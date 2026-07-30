@@ -25,6 +25,42 @@ slugify() {
 	echo "${1:-}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
 
+# A scope is the neutral key for the work item a meeting belongs to. It is
+# used as a path component under SCRIBE_SCOPE_ROOT, so it must be a single
+# safe filename token — never a path (no /, no .., no leading dot).
+validate_scope() {
+	[[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+	[[ "$1" == *..* ]] && return 1
+	return 0
+}
+
+# §3 per-meeting glossary: emit hotword terms derived from this meeting's own
+# context — the scope's glossary file under SCRIBE_SCOPE_ROOT (one term per
+# line, '#' comments), the attendee list (comma-separated), and the topic
+# (one phrase). The reviewed global SCRIBE_GLOSSARY file is never read or
+# written here: per-meeting terms are additive on top of it downstream
+# (scribe-transcribe.py --glossary-extra) and die with the meeting's RAM dir.
+emit_hotword_sources() {
+	local scope="${1:-}" topic="${2:-}" attendees="${3:-}"
+	local root="${SCRIBE_SCOPE_ROOT:-}"
+	if [[ -n "$root" && -n "$scope" && -f "$root/$scope/glossary.txt" ]]; then
+		grep -vE '^[[:space:]]*(#|$)' "$root/$scope/glossary.txt" || true
+	fi
+	if [[ -n "$attendees" ]]; then
+		printf '%s\n' "$attendees" | tr ',' '\n' \
+			| sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^$' || true
+	fi
+	if [[ -n "$topic" ]]; then
+		printf '%s\n' "$topic"
+	fi
+	return 0
+}
+
+derive_hotwords() {
+	emit_hotword_sources "$@" | awk '!seen[$0]++'
+	return 0
+}
+
 ram_dir() {
 	echo "$RAMROOT/scribe/${1:?}"
 }
@@ -110,6 +146,12 @@ compose_capture() {
 	if [[ -n "${SCRIBE_GLOSSARY:-}" ]]; then
 		glossary_arg=" --glossary \"${SCRIBE_GLOSSARY}\""
 	fi
+	# Per-meeting hotwords (written by `start` when a --scope was supplied)
+	# ride along as an additive second glossary; the global file above is
+	# passed through untouched.
+	if [[ -f "$dir/hotwords.txt" ]]; then
+		glossary_arg="${glossary_arg} --glossary-extra \"$dir/hotwords.txt\""
+	fi
 
 	local lines=()
 	lines+=("parec --raw --format=s16le --rate=16000 --channels=1 -d \"$source\" | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel me${glossary_arg} &")
@@ -186,7 +228,7 @@ doctor() {
 # Meeting lifecycle: start / status / abort / stop
 
 start() {
-	local consent="" topic="" attendees="" teams=0 no_analyst=0
+	local consent="" topic="" attendees="" scope="" teams=0 no_analyst=0
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 			--consent)
@@ -199,6 +241,10 @@ start() {
 				;;
 			--attendees)
 				attendees="${2:-}"
+				shift 2
+				;;
+			--scope)
+				scope="${2:-}"
 				shift 2
 				;;
 			--teams)
@@ -221,6 +267,11 @@ start() {
 		return 1
 	fi
 
+	if [[ -n "$scope" ]] && ! validate_scope "$scope"; then
+		echo "start: --scope must be a plain name (letters/digits/._-, no path separators)" >&2
+		return 1
+	fi
+
 	local existing
 	if existing="$(current_id)"; then
 		echo "start: a meeting is already running ($existing); stop or abort it first" >&2
@@ -233,11 +284,22 @@ start() {
 	mkdir -p "$dir"
 	: > "$dir/transcript.md"
 
+	# §3: per-meeting hotwords, derived only when a scope was supplied.
+	# Lives in the RAM dir (destroyed with the meeting); the global
+	# SCRIBE_GLOSSARY file is never mutated.
+	if [[ -n "$scope" && "${SCRIBE_MEETING_GLOSSARY:-1}" != "0" ]]; then
+		derive_hotwords "$scope" "$topic" "$attendees" > "$dir/hotwords.txt"
+		if [[ ! -s "$dir/hotwords.txt" ]]; then
+			rm -f "$dir/hotwords.txt"
+		fi
+	fi
+
 	{
 		echo "id: $id"
 		echo "consent: $consent"
 		echo "topic: $topic"
 		echo "attendees: $attendees"
+		echo "scope: $scope"
 		echo "teams: $teams"
 		if [[ "$no_analyst" -eq 1 ]]; then
 			echo "analyst: off"
@@ -341,6 +403,14 @@ case "${1:-}" in
 		;;
 	--slugify)
 		slugify "${2:-}"
+		exit 0
+		;;
+	--validate-scope)
+		validate_scope "${2:-}"
+		exit $?
+		;;
+	--derive-hotwords)
+		derive_hotwords "${2:-}" "${3:-}" "${4:-}"
 		exit 0
 		;;
 	--ram-dir)

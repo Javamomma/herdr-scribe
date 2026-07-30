@@ -46,6 +46,12 @@ command = ["bash", "scribe.sh", "start"]
   description = "Free-text attendee list (e.g. comma-separated names), recorded in meta."
 
   [[actions.options]]
+  flag = "--scope"
+  type = "string"
+  required = false
+  description = "Neutral key for the work item this meeting belongs to (plain name, no path separators). Recorded in meta; when set, per-meeting hotwords are derived from the scope's glossary under SCRIBE_SCOPE_ROOT plus the attendees/topic and passed additively to the recognizer — the global glossary file is never modified."
+
+  [[actions.options]]
   flag = "--teams"
   type = "boolean"
   default = false
