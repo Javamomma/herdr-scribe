@@ -13,3 +13,6 @@ __pycache__/
 
 # Editor / OS
 .DS_Store
+
+# Default output tree (transcripts, notes, sidecars, drafts, audit log)
+meetings/

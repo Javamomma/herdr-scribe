@@ -127,3 +127,118 @@
 # at your own downstream pipeline to extend what happens after a meeting
 # without touching the capture engine.
 # export SCRIBE_ON_STOP=""
+
+# --- Scope + per-meeting glossary (§3) -----------------------------------
+#
+# NOTE ON PRECEDENCE for everything below: scribe.sh sources this file on
+# every run, so a plain `export VAR="value"` line would OVERRIDE a value you
+# exported in your shell for one invocation. If you want per-invocation env
+# to win over this file, write entries in the guard form shown, e.g.:
+#   export SCRIBE_ARTIFACT_CAP="${SCRIBE_ARTIFACT_CAP:-6}"
+
+# Root directory containing one subdirectory per scope (the neutral key you
+# pass to `start --scope <name>`). When set and <root>/<scope>/glossary.txt
+# exists, its terms (plus the meeting's attendees/topic) are fed to the
+# recognizer for that meeting only — additive; the global SCRIBE_GLOSSARY
+# file is never modified. Unset: only attendees/topic are used.
+# export SCRIBE_SCOPE_ROOT=""
+
+# Set to "0" to disable per-meeting hotword injection entirely (the global
+# glossary alone is used, exactly the pre-scope behavior).
+# export SCRIBE_MEETING_GLOSSARY="1"
+
+# --- Deep analyst / document retrieval (§1b, §2) -------------------------
+
+# Root of the document corpus the deep tier may search READ-ONLY. Unset
+# (default): the deep tier is OFF and the analyst behaves exactly as before.
+# export SCRIBE_DEEP_CORPUS_ROOT=""
+
+# Explicitly disable the deep tier even when a corpus root is set.
+# export SCRIBE_DEEP_ENABLE="1"
+
+# Model command for the deep tier only; falls back to SCRIBE_LLM_CMD.
+# export SCRIBE_LLM_CMD_DEEP=""
+
+# Hard timeout (seconds) on one retrieval; a hung retrieval appends a loud
+# failure block and never wedges the analyst loop. Malformed → 120 + warning.
+# export SCRIBE_DEEP_TIMEOUT="120"
+
+# How many retrieval blocks the analyst pane shows (the bound is stated in
+# the pane output) and how many corpus files one retrieval may read.
+# Malformed → default + warning.
+# export SCRIBE_DEEP_MAX_BLOCKS="3"
+# export SCRIBE_DEEP_MAX_FILES="5"
+
+# Document→text helper used on corpus files (see scribe-doc2text). Per-
+# format extractors are overridable via SCRIBE_EXTRACT_CMD_<EXT> (uppercased
+# extension; the command gets the file as "$1" and prints plain text), e.g.:
+#   export SCRIBE_EXTRACT_CMD_PDF='pdftotext -layout -q "$1" -'
+# export SCRIBE_DOC2TEXT_CMD=""
+
+# --- Stop sequence: note + gate (§5) -------------------------------------
+
+# Replace the core note generator run on stop (default: scribe-notes,
+# invoked with the written transcript path). Legacy note: if you set
+# SCRIBE_ON_STOP and no SCRIBE_NOTES_CMD, core writes no note of its own —
+# your hook owns everything downstream, exactly the pre-gate behavior.
+# export SCRIBE_NOTES_CMD=""
+
+# Optional post-note gate: run with the note path ($1) and the still-live
+# meeting dir ($2) after the note is written and BEFORE the in-memory
+# transcript is destroyed. Exit 0 = proceed (destroy); exit 75 = HOLD (move
+# the meeting dir to the quarantine dir instead of destroying it); any other
+# failure or a timeout is treated as hold — fail closed in both directions.
+# Core ships this seam and no policy.
+# export SCRIBE_GATE_CMD=""
+
+# Hard timeout (seconds) on the gate. Malformed → 60 + warning.
+# export SCRIBE_GATE_TIMEOUT="60"
+
+# Where held meetings are moved. Must be durable: a path inside the RAM
+# root is refused (with a warning) and the default is used instead.
+# export SCRIBE_QUARANTINE_DIR=""   # default: <output-dir>/quarantine
+
+# Append-only audit log: one line per stop (timestamp, meeting, verdict,
+# action, gate message verbatim) — written on every outcome, gate or not.
+# export SCRIBE_AUDIT_LOG=""        # default: <output-dir>/scribe-audit.log
+
+# --- Auto-artifacts (§4) -------------------------------------------------
+
+# Master switch. "1" = on stop (after a clear gate verdict), classify the
+# meeting NOTE for implied follow-up documents, auto-draft the strong
+# candidates within the cap, and queue the rest for approval via
+# `scribe.sh artifacts`. Default off: stop behaves exactly as before.
+# export SCRIBE_ARTIFACTS="0"
+
+# Max drafts built automatically per meeting. "0" = queue everything, build
+# nothing. Malformed values fall back to 6 WITH a warning — note the unsafe
+# direction is silently raising the cap (more unattended model builds than
+# you asked for), so fix warnings rather than ignoring them.
+# export SCRIBE_ARTIFACT_CAP="${SCRIBE_ARTIFACT_CAP:-6}"
+
+# Allowlist of artifact types (comma/space separated, e.g. "summary memo
+# status-update"). Unset/empty = every proposed type is enabled; with a
+# list, anything else is recorded as disabled-type (visible, not built).
+# export SCRIBE_ARTIFACT_TYPES=""
+
+# Where candidate sidecars / the run log / review tasks / drafts live.
+# export SCRIBE_ARTIFACTS_DIR=""      # default: <output-dir>/.artifacts
+# export SCRIBE_RUN_LOG=""            # default: <artifacts-dir>/run.log
+# export SCRIBE_REVIEW_TASKS=""       # default: <artifacts-dir>/review-tasks.tsv
+# export SCRIBE_ARTIFACT_OUT_DIR=""   # default: <output-dir>/artifacts
+
+# Replace the built-in draft generator: the command receives
+# type/scope/audience/topic/note-path as $1..$5 and prints the document to
+# stdout. Default: a generic SCRIBE_LLM_CMD draft. Drafts are never
+# transmitted anywhere by scribe regardless of generator.
+# export SCRIBE_ARTIFACT_GENERATOR_CMD=""
+
+# Hard timeout (seconds) for one classification/generation model call.
+# export SCRIBE_CLASSIFY_TIMEOUT="300"
+
+# "0" disables the post-stop interactive review pane (tmux only; the
+# `scribe.sh artifacts` CLI hint is printed either way).
+# export SCRIBE_REVIEW_PANE="1"
+
+# Bound on `scribe.sh artifacts --all` (the bound is stated in the output).
+# export SCRIBE_ARTIFACTS_ALL_LIMIT="20"

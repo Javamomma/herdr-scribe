@@ -56,17 +56,39 @@ Explicitly out of scope (belongs in a private downstream layer, reached via the
    transcript delta to produce a short rolling brief (Now / Commitments /
    Open-questions / Watch), shown in a second pane. Analysis is ephemeral and
    destroyed with the meeting.
-5. **Stop.** Write the transcript to the output dir; **destroy** the RAM
-   directory and all buffers; run the `SCRIBE_ON_STOP` hook against the written
-   transcript (default: the generic note generator). `abort` discards everything
-   with no note. `status` reports the running meeting.
+5. **Stop.** A fixed sequence (see `docs/PARITY-PORT.md` §5): write the
+   transcript to the output dir → generate the note (core step, default
+   `scribe-notes`; `SCRIBE_NOTES_CMD` replaces it) → run the optional gate
+   (`SCRIBE_GATE_CMD`; exit 75 or any failure/timeout = hold → the meeting
+   dir is **quarantined**, never destroyed; every outcome writes one audit
+   line) → on a clear verdict **destroy** the RAM directory and all
+   buffers → optionally classify/draft artifacts (`SCRIBE_ARTIFACTS=1`) →
+   run the `SCRIBE_ON_STOP` hook. `abort` discards everything with no note.
+   `status` reports the running meeting.
+6. **Two-tier analyst.** The rolling-brief loop may emit one anchored
+   `RETRIEVE:` trigger per cycle (stripped from the pane); with a corpus
+   configured (`SCRIBE_DEEP_CORPUS_ROOT`), a detached, single-in-flight,
+   hard-timeboxed worker answers it with a verbatim, path-cited passage
+   appended to the pane (bounded tail; light rewrites never clobber it).
+7. **Auto-artifacts.** After a clear stop, a classifier over the note
+   proposes follow-up documents; strong candidates within a cap are drafted
+   (local files only, never transmitted), everything else is queued in a
+   per-meeting sidecar and approved later via the zero-model
+   `scribe.sh artifacts` surface / review pane.
 
-## The `SCRIBE_ON_STOP` seam
+## The extension seams
 
-`stop` invokes `SCRIBE_ON_STOP "<transcript-path>" "<meta...>"`. This is the one
-extension point: the public default generates a generic note; a private consumer
-can point it at its own pipeline. Keeping this a clean hook is what lets a
-downstream/private layer sit on top **without forking the capture engine**.
+- **`SCRIBE_ON_STOP`** — `stop` invokes it with the written transcript path
+  after a clear verdict. The classic extension point: a private consumer
+  points it at its own pipeline. If it is set (and no `SCRIBE_NOTES_CMD`),
+  core skips its own note generation — the pre-gate behavior, unchanged.
+- **`SCRIBE_GATE_CMD`** — the post-note gate (§5 of the parity brief): core
+  ships the mechanism (hold/quarantine/audit, fail closed both ways) and no
+  policy; a downstream layer plugs its rules in here without core ever
+  learning them.
+
+Keeping these clean hooks is what lets a downstream/private layer sit on top
+**without forking the capture engine**.
 
 ## Platforms
 

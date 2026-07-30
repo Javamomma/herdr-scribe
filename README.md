@@ -109,9 +109,10 @@ bash scribe.sh start --consent one-party --no-analyst
 # Check what's running (prints the meeting id, or "none"):
 bash scribe.sh status
 
-# End the meeting: writes the transcript to SCRIBE_OUTPUT_DIR, destroys the
-# RAM buffers, then runs the on-stop hook (see below) against the written
-# transcript. Prints the transcript path.
+# End the meeting: writes the transcript to SCRIBE_OUTPUT_DIR, generates the
+# meeting note, runs the optional gate, destroys the RAM buffers (or
+# quarantines them on a gate hold), then runs the on-stop hook (see below).
+# Prints the transcript path.
 bash scribe.sh stop
 
 # Discard the meeting instead: destroys everything, writes nothing, no note.
@@ -121,29 +122,77 @@ bash scribe.sh abort
 herdr's single-meeting model means only one meeting runs at a time; `start`
 refuses to run again until the current one is `stop`ped or `abort`ed.
 
-### 5. The `SCRIBE_ON_STOP` seam
+### 5. What happens on `stop`
 
-On `stop`, once the transcript is safely written out and the RAM buffers are
-destroyed, scribe runs:
+`stop` runs a fixed sequence, each step fail-safe so a downstream failure
+can never lose the meeting:
+
+1. **Transcript out.** `transcript.md` is copied to `SCRIBE_OUTPUT_DIR`
+   (durable from this point on).
+2. **Note.** `scribe-notes` feeds the transcript to `SCRIBE_LLM_CMD` and
+   writes a plain meeting note (Attendees / Decisions / an owner-attributed
+   Action Items table) alongside it. Replace the generator with
+   `SCRIBE_NOTES_CMD`; if you instead point `SCRIBE_ON_STOP` at your own
+   pipeline (the classic seam) and set no `SCRIBE_NOTES_CMD`, core writes
+   no note of its own — exactly the pre-gate behavior.
+3. **Gate (optional).** If `SCRIBE_GATE_CMD` is set it runs with the note
+   path and the still-live meeting dir, hard-timeboxed. Exit 0 → proceed;
+   exit 75 → **hold**; anything else (including a timeout) → hold — fail
+   closed in both directions. A hold moves the meeting dir to
+   `SCRIBE_QUARANTINE_DIR` (never inside the RAM root) instead of
+   destroying it, and skips the downstream steps. Every outcome appends one
+   line to the audit log (`SCRIBE_AUDIT_LOG`). Core ships the seam and no
+   policy: it records the gate's own message and takes no view on it.
+4. **Destroy.** On a clear verdict the RAM dir and all buffers are removed.
+5. **Artifacts (optional, `SCRIBE_ARTIFACTS=1`).** See §8.
+6. **Hook.** If `SCRIBE_ON_STOP` is set, it runs against the written
+   transcript. If it fails, the transcript stays where `stop` wrote it.
+
+### 6. Scopes and the per-meeting glossary
+
+`start --scope <name>` tags the meeting with a neutral work-item key. When a
+scope is supplied, scribe derives per-meeting recognizer hotwords from the
+scope's own context — `"$SCRIBE_SCOPE_ROOT/<scope>/glossary.txt"` plus the
+`--attendees`/`--topic` you passed — deduplicates them, and feeds them to
+the STT worker *additively* for this meeting only. The reviewed global
+`SCRIBE_GLOSSARY` file is never modified. Disable with
+`SCRIBE_MEETING_GLOSSARY=0`.
+
+### 7. The deep analyst (document retrieval)
+
+Off by default; enable by pointing `SCRIBE_DEEP_CORPUS_ROOT` at a document
+corpus. The live analyst may then flag one retrieval per cycle when the
+conversation references a document, and a detached worker searches the
+corpus (read-only, fixed-string), extracts text via `scribe-doc2text`, and
+appends the **verbatim** passage with its source path to the analyst pane —
+"not found" is an acceptable answer; a paraphrase is not. One retrieval in
+flight at a time (later triggers coalesce), hard-timeboxed
+(`SCRIBE_DEEP_TIMEOUT`), separate model command via `SCRIBE_LLM_CMD_DEEP`.
+`scribe-doc2text` handles plaintext natively, `pdftotext`/`pandoc` formats
+when installed, and anything else via `SCRIBE_EXTRACT_CMD_<EXT>`.
+
+### 8. Auto-artifacts (draft, review, approve)
+
+With `SCRIBE_ARTIFACTS=1`, `stop` classifies the meeting **note** for
+follow-up documents the meeting implied (a summary for an absent audience, a
+status update, a memo…), auto-drafts up to `SCRIBE_ARTIFACT_CAP` (default 6)
+of the strong candidates, and queues the rest — every candidate, built and
+skipped alike, is recorded so a skipped one can be approved later:
 
 ```
-${SCRIBE_ON_STOP:-scribe-notes} <transcript-path>
+bash scribe.sh artifacts                 # review view for the last meeting
+bash scribe.sh artifacts <meeting>       # ... for a specific meeting
+bash scribe.sh artifacts <meeting> --approve 4 5
+bash scribe.sh artifacts <meeting> --approve-all
+bash scribe.sh artifacts --all           # bounded cross-meeting summary
 ```
 
-The default, `scribe-notes`, is a generic on-stop note generator: it feeds
-the transcript to `SCRIBE_LLM_CMD` and writes a plain meeting note
-(Attendees / Decisions / an owner-attributed Action Items table) alongside
-the transcript — no privilege, confidentiality, retention, or domain-specific
-framing of any kind.
+Drafts are local files under `SCRIBE_ARTIFACT_OUT_DIR`, back-linked into the
+note, each with an open review task — nothing is ever sent anywhere. The
+review surface makes zero model calls. Inside tmux, `stop` also opens an
+interactive review pane (`SCRIBE_REVIEW_PANE=0` to disable).
 
-This is the one extension point in the whole plugin: point `SCRIBE_ON_STOP`
-at your own script to route the transcript into a different downstream
-pipeline (a different note format, a different destination, additional
-processing) without touching the capture engine at all. If the hook fails
-for any reason, the transcript stays right where `stop` wrote it — a
-downstream failure can never lose the meeting.
-
-### 6. Optional bridges
+### 9. Optional bridges
 
 Both are fully optional and degrade gracefully (mic-only / no screen
 context) when unavailable — run `bash scribe.sh --doctor` any time to see
