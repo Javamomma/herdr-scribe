@@ -242,3 +242,19 @@
 
 # Bound on `scribe.sh artifacts --all` (the bound is stated in the output).
 # export SCRIBE_ARTIFACTS_ALL_LIMIT="20"
+
+# --- Capture backend (platform) ------------------------------------------
+
+# "auto" (default): parec/PulseAudio when available (Linux/WSL2), else
+# ffmpeg/avfoundation on macOS. Force with "pulse" or "avfoundation".
+# export SCRIBE_CAPTURE_BACKEND="auto"
+
+# On the avfoundation backend, SCRIBE_CAPTURE_SOURCE is an ffmpeg device
+# spec (":0" = first audio device; list devices with
+#   ffmpeg -f avfoundation -list_devices true -i "").
+# macOS will prompt for microphone permission on first capture.
+#
+# macOS has no tmpfs: without SCRIBE_RAMROOT the meeting dir falls back to
+# the user temp dir (transcript TEXT may touch disk until stop; audio never
+# does). For a true RAM-only transcript root:
+#   export SCRIBE_RAMROOT="$(bash scribe-ramdisk-macos.sh)"

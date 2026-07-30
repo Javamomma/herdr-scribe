@@ -23,7 +23,9 @@ if have python3; then ok "python3"; else bad "python3 (required)"; fi
 if python3 -c "import faster_whisper" 2>/dev/null; then ok "faster-whisper (python module)"
   else bad "faster-whisper — 'pip install faster-whisper' (required for real STT)"; fi
 if have parec; then ok "parec (PulseAudio capture)"
-  else bad "parec — install pulseaudio-utils (required for mic capture)"; fi
+  elif [ "$(uname -s)" = "Darwin" ] && have ffmpeg; then
+    ok "mic capture via ffmpeg/avfoundation (macOS backend)"
+  else bad "parec — install pulseaudio-utils (required for mic capture; on macOS, ffmpeg provides the avfoundation backend instead)"; fi
 if have ffmpeg; then ok "ffmpeg (loopback resample)"
   else opt "ffmpeg — only needed for --teams loopback; mic-only works without it"; fi
 if have herdr; then ok "herdr"

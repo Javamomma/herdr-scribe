@@ -75,14 +75,18 @@ def test_ram_dir_env(tmp_path):
 
 
 def test_ram_dir_default():
-    """ram_dir should default to /dev/shm if SCRIBE_RAMROOT unset."""
+    """SCRIBE_RAMROOT unset → /dev/shm where tmpfs exists (Linux/WSL2);
+    hosts without it (macOS, Termux) fall back to the user temp dir."""
     result = run(
         ["--ram-dir", "test-id"],
         env={"SCRIBE_RAMROOT": ""},  # unset
     )
-    # Default should be /dev/shm
-    expected = "/dev/shm/scribe/test-id"
-    assert result.stdout.strip() == expected
+    got = result.stdout.strip()
+    assert got.endswith("/scribe/test-id")
+    if os.path.isdir("/dev/shm"):
+        assert got == "/dev/shm/scribe/test-id"
+    else:
+        assert not got.startswith("/dev/shm")
 
 
 def test_out_dir_env(tmp_path):
@@ -2481,3 +2485,57 @@ def test_stop_with_artifacts_off_touches_nothing(tmp_path):
     meeting_id, ram_dir, stopped = start_stop_meeting(tmp_path, env)
     assert stopped.returncode == 0
     assert not (tmp_path / "out" / ".artifacts").exists()
+
+
+# --- macOS capture backend ---
+
+def test_compose_forced_pulse_backend_uses_parec(tmp_path):
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path), "SCRIBE_CAPTURE_BACKEND": "pulse"},
+    )
+    assert "parec" in result.stdout
+    assert "avfoundation" not in result.stdout
+
+
+def test_compose_forced_avfoundation_backend(tmp_path):
+    """The macOS backend feeds the same s16le/16k/mono contract from
+    ffmpeg/avfoundation, defaulting to the first audio device."""
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path),
+             "SCRIBE_CAPTURE_BACKEND": "avfoundation"},
+    )
+    out = result.stdout
+    assert "-f avfoundation" in out
+    assert '":0"' in out
+    assert "-f s16le -ar 16000 -ac 1" in out
+    assert "scribe-transcribe.py" in out
+    assert "parec" not in out
+
+
+def test_compose_avfoundation_respects_capture_source(tmp_path):
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path),
+             "SCRIBE_CAPTURE_BACKEND": "avfoundation",
+             "SCRIBE_CAPTURE_SOURCE": ":2"},
+    )
+    assert '":2"' in result.stdout
+
+
+def test_compose_auto_backend_resolves_to_a_known_backend(tmp_path):
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path), "SCRIBE_CAPTURE_BACKEND": "auto"},
+    )
+    assert ("parec" in result.stdout) or ("avfoundation" in result.stdout)
+
+
+def test_ramdisk_helper_has_usage_and_refuses_nonmac_gracefully():
+    result = subprocess.run(
+        [BASH, str(REPO_ROOT / "scribe-ramdisk-macos.sh"), "--help"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "SCRIBE_RAMROOT" in result.stderr + result.stdout

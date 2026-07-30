@@ -25,7 +25,12 @@ Meeting recorders create a file you then have to store, protect, and delete. scr
 
 - herdr ≥ 0.7.0
 - A speech-to-text engine (default: [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper), `base.en`)
-- Linux or WSL2 with a working mic capture source (WSLg / PulseAudio)
+- Linux or WSL2 with a working mic capture source (WSLg / PulseAudio), **or
+  macOS** (mic capture via `ffmpeg`'s avfoundation backend — auto-selected
+  when `parec` is absent; macOS prompts for microphone permission on first
+  use). macOS has no tmpfs, so either accept the temp-dir fallback for the
+  transcript text or run `scribe-ramdisk-macos.sh` and point
+  `SCRIBE_RAMROOT` at the printed RAM disk.
 - Optional: Windows host for remote-participant loopback capture (also needs
   `ffmpeg` on the machine running `scribe.sh`, to resample that stream)
 - A headless LLM command for the analyst / notes (configurable; default `claude -p`)

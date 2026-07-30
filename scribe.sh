@@ -5,7 +5,20 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [[ -f "${SCRIBE_CONF:-$HERE/scribe.conf}" ]] && source "${SCRIBE_CONF:-$HERE/scribe.conf}"
 
-RAMROOT="${SCRIBE_RAMROOT:-/dev/shm}"
+# RAM root for the in-memory meeting dir. Linux/WSL2 has tmpfs at /dev/shm;
+# macOS (and Termux) have no tmpfs mount at all, so fall back to the user
+# temp dir — NOTE: that fallback is NOT RAM-backed, so transcript text may
+# touch disk until destroyed on stop (audio still never does; it only ever
+# lives in pipes). For a true RAM-only transcript on macOS, create a RAM
+# disk with scribe-ramdisk-macos.sh and point SCRIBE_RAMROOT at it.
+if [[ -n "${SCRIBE_RAMROOT:-}" ]]; then
+	RAMROOT="$SCRIBE_RAMROOT"
+elif [[ -d /dev/shm ]]; then
+	RAMROOT="/dev/shm"
+else
+	RAMROOT="${TMPDIR:-/tmp}"
+	RAMROOT="${RAMROOT%/}"
+fi
 OUTDIR="${SCRIBE_OUTPUT_DIR:-$PWD/meetings}"
 
 # Core helper functions
@@ -135,6 +148,29 @@ clear_current_if_matches() {
 # but the exe is missing, OR the exe exists but ffmpeg isn't available to
 # resample it, a warning is printed to stderr and the pipeline falls back to
 # mic-only -- raw device-format audio is never handed to the worker.
+# Capture backend selection: "pulse" (parec — Linux/WSL2), "avfoundation"
+# (ffmpeg — macOS), or "auto" (default): pulse when parec is on PATH, else
+# avfoundation on Darwin when ffmpeg is, else pulse — whose own runtime
+# error is the loudest possible "install pulseaudio-utils" message.
+capture_backend() {
+	local choice="${SCRIBE_CAPTURE_BACKEND:-auto}"
+	case "$choice" in
+		pulse|avfoundation)
+			echo "$choice"
+			return 0
+			;;
+	esac
+	if command -v parec >/dev/null 2>&1; then
+		echo "pulse"
+	elif [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] \
+		&& command -v "${SCRIBE_FFMPEG_BIN:-ffmpeg}" >/dev/null 2>&1; then
+		echo "avfoundation"
+	else
+		echo "pulse"
+	fi
+	return 0
+}
+
 compose_capture() {
 	local id="${1:?}"
 	local dir transcript
@@ -153,8 +189,26 @@ compose_capture() {
 		glossary_arg="${glossary_arg} --glossary-extra \"$dir/hotwords.txt\""
 	fi
 
+	# Mic stream: same s16le/16k/mono contract from either backend. For
+	# avfoundation, SCRIBE_CAPTURE_SOURCE is an ffmpeg device spec (":0" =
+	# first audio device; list with
+	#   ffmpeg -f avfoundation -list_devices true -i "");
+	# the pulse default alias means "unset" there.
+	local backend mic_cmd
+	backend="$(capture_backend)"
+	if [[ "$backend" == "avfoundation" ]]; then
+		local av_dev="$source"
+		if [[ -z "$av_dev" || "$av_dev" == "@DEFAULT_SOURCE@" ]]; then
+			av_dev=":0"
+		fi
+		local av_ffmpeg="${SCRIBE_FFMPEG_BIN:-ffmpeg}"
+		mic_cmd="\"$av_ffmpeg\" -loglevel error -f avfoundation -i \"$av_dev\" -f s16le -ar 16000 -ac 1 pipe:1"
+	else
+		mic_cmd="parec --raw --format=s16le --rate=16000 --channels=1 -d \"$source\""
+	fi
+
 	local lines=()
-	lines+=("parec --raw --format=s16le --rate=16000 --channels=1 -d \"$source\" | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel me${glossary_arg} &")
+	lines+=("$mic_cmd | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel me${glossary_arg} &")
 
 	if [[ "${SCRIBE_TEAMS:-0}" == "1" ]]; then
 		local exe="${SCRIBE_LOOPBACK_EXE:-}"
@@ -207,6 +261,9 @@ current_analyst_path() {
 doctor() {
 	echo "scribe doctor -- optional bridge availability"
 	echo ""
+
+	echo "  capture backend: $(capture_backend) (SCRIBE_CAPTURE_BACKEND=${SCRIBE_CAPTURE_BACKEND:-auto})"
+	echo "  ram root: $RAMROOT$( [[ -d /dev/shm ]] || echo ' -- no tmpfs on this host; see scribe-ramdisk-macos.sh for a RAM-backed root' )"
 
 	local loopback_exe="${SCRIBE_LOOPBACK_EXE:-}"
 	if [[ -n "$loopback_exe" && -e "$loopback_exe" ]]; then

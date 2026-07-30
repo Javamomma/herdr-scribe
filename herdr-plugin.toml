@@ -14,7 +14,7 @@ name = "Scribe"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Live, no-recording meeting transcription: mic (+ optional call loopback) → live transcript + analyst panes; on stop, a plain meeting note. No audio file ever."
-platforms = ["linux"]   # WSL2 counts as linux; Windows host used only for optional loopback
+platforms = ["linux", "macos"]   # WSL2 counts as linux; Windows host used only for optional loopback; macOS captures via ffmpeg/avfoundation
 
 # --- Actions ---------------------------------------------------------------
 
