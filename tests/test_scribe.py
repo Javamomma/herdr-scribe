@@ -1159,3 +1159,92 @@ def test_transcribe_glossary_extra_is_additive_and_deduped(tmp_path):
     )
     assert result.returncode == 0
     assert "glossary:3" in result.stderr
+
+
+# --- §2 scribe-doc2text helper ---
+
+DOC2TEXT = str(REPO_ROOT / "scribe-doc2text")
+
+
+def run_doc2text(args, env=None):
+    merged_env = {**os.environ, **(env or {})}
+    return subprocess.run(
+        [BASH, DOC2TEXT, *args], capture_output=True, text=True, env=merged_env
+    )
+
+
+def test_doc2text_plaintext_passthrough(tmp_path):
+    doc = tmp_path / "notes.txt"
+    doc.write_text("hello\nworld\n")
+    result = run_doc2text([str(doc)])
+    assert result.returncode == 0
+    assert result.stdout == "hello\nworld\n"
+
+
+def test_doc2text_markdown_passthrough(tmp_path):
+    doc = tmp_path / "notes.md"
+    doc.write_text("# h\n")
+    result = run_doc2text([str(doc)])
+    assert result.returncode == 0
+    assert result.stdout == "# h\n"
+
+
+def test_doc2text_unknown_extension_is_loud_nonzero(tmp_path):
+    doc = tmp_path / "blob.zzz"
+    doc.write_text("x")
+    result = run_doc2text([str(doc)])
+    assert result.returncode != 0
+    assert result.stdout == ""  # never an empty-string "success"
+    assert "could not extract" in result.stderr
+    assert str(doc) in result.stderr
+
+
+def test_doc2text_no_extension_is_loud_nonzero(tmp_path):
+    doc = tmp_path / "README"
+    doc.write_text("x")
+    result = run_doc2text([str(doc)])
+    assert result.returncode != 0
+    assert "could not extract" in result.stderr
+
+
+def test_doc2text_missing_file_is_loud_nonzero(tmp_path):
+    result = run_doc2text([str(tmp_path / "absent.txt")])
+    assert result.returncode != 0
+    assert "could not extract" in result.stderr
+
+
+def test_doc2text_missing_extractor_is_loud_nonzero(tmp_path):
+    """A configured extractor binary that isn't installed → non-zero with a
+    message naming the override variable, not an empty success."""
+    doc = tmp_path / "doc.pdf"
+    doc.write_text("not really a pdf")
+    result = run_doc2text(
+        [str(doc)],
+        env={"SCRIBE_EXTRACT_CMD_PDF": 'no-such-extractor-xyz "$1"'},
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "could not extract" in result.stderr
+    assert "no-such-extractor-xyz" in result.stderr
+
+
+def test_doc2text_env_override_runs_custom_extractor(tmp_path):
+    doc = tmp_path / "doc.xyz"
+    doc.write_text("abc\n")
+    result = run_doc2text(
+        [str(doc)],
+        env={"SCRIBE_EXTRACT_CMD_XYZ": 'tr a-z A-Z < "$1"'},
+    )
+    assert result.returncode == 0
+    assert result.stdout == "ABC\n"
+
+
+def test_doc2text_extractor_runtime_failure_is_loud_nonzero(tmp_path):
+    doc = tmp_path / "doc.xyz"
+    doc.write_text("abc\n")
+    result = run_doc2text(
+        [str(doc)],
+        env={"SCRIBE_EXTRACT_CMD_XYZ": "false"},
+    )
+    assert result.returncode != 0
+    assert "extractor failed" in result.stderr

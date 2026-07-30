@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# scribe-doc2text — print a document's plain text to stdout.
+#
+# Usage:
+#   scribe-doc2text <path>
+#
+# Dispatches on file extension: plaintext formats pass straight through;
+# binary formats run whatever extractor is present on the host (pdftotext,
+# pandoc). Every format's extractor command is env-overridable via
+# SCRIBE_EXTRACT_CMD_<EXT> (extension uppercased, e.g. SCRIBE_EXTRACT_CMD_PDF);
+# the command is run as `bash -c "<cmd>" _ <path>`, so reference the document
+# as "$1" and print plain text to stdout.
+#
+# Dependency-optional, and it degrades LOUDLY, never silently: a file that
+# cannot be read produces "could not extract <path>: <reason>" on stderr and a
+# non-zero exit — never an empty stdout that a model downstream would read as
+# "the document is blank."
+#
+# Exit codes:
+#   0  extracted (stdout is the text)
+#   1  file missing/unreadable
+#   2  no extractor known for this extension
+#   3  extractor not installed on this host
+#   4  extractor ran and failed
+#   64 usage error
+set -euo pipefail
+
+usage() {
+	echo "usage: scribe-doc2text <path>" >&2
+}
+
+case "${1:-}" in
+	-h|--help)
+		usage
+		exit 0
+		;;
+esac
+
+PATH_IN="${1:-}"
+if [[ -z "$PATH_IN" ]]; then
+	usage
+	exit 64
+fi
+
+if [[ ! -f "$PATH_IN" || ! -r "$PATH_IN" ]]; then
+	echo "scribe-doc2text: could not extract $PATH_IN: no such readable file" >&2
+	exit 1
+fi
+
+base="$(basename -- "$PATH_IN")"
+ext=""
+if [[ "$base" == *.* && "$base" != .* ]]; then
+	ext="$(printf '%s' "${base##*.}" | tr '[:upper:]' '[:lower:]')"
+fi
+
+if [[ -z "$ext" ]]; then
+	echo "scribe-doc2text: could not extract $PATH_IN: no file extension to dispatch on" >&2
+	exit 2
+fi
+
+# Env override: SCRIBE_EXTRACT_CMD_<EXT>, extension uppercased with any
+# non-alphanumeric squashed to '_'.
+key="SCRIBE_EXTRACT_CMD_$(printf '%s' "$ext" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+key="${key%_}"
+cmd="${!key:-}"
+
+if [[ -z "$cmd" ]]; then
+	case "$ext" in
+		txt|md|markdown|text|log|csv|tsv|json|yaml|yml|conf|ini)
+			exec cat -- "$PATH_IN"
+			;;
+		pdf)
+			cmd='pdftotext -layout -q "$1" -'
+			;;
+		docx|odt|rtf|epub|html|htm)
+			cmd='pandoc -t plain "$1"'
+			;;
+		*)
+			echo "scribe-doc2text: could not extract $PATH_IN: no extractor for extension '.$ext' (set $key to add one)" >&2
+			exit 2
+			;;
+	esac
+fi
+
+first_word="${cmd%% *}"
+if ! command -v "$first_word" >/dev/null 2>&1; then
+	echo "scribe-doc2text: could not extract $PATH_IN: extractor '$first_word' not found (install it or set $key)" >&2
+	exit 3
+fi
+
+if ! bash -c "$cmd" _ "$PATH_IN"; then
+	echo "scribe-doc2text: could not extract $PATH_IN: extractor failed ($first_word)" >&2
+	exit 4
+fi
+exit 0
