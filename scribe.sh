@@ -116,6 +116,9 @@ compose_capture() {
 
 	if [[ "${SCRIBE_TEAMS:-0}" == "1" ]]; then
 		local exe="${SCRIBE_LOOPBACK_EXE:-}"
+		# Deliberate symlink semantics: -e follows symlinks, so a BROKEN
+		# symlink counts as "not available" and degrades to mic-only with
+		# the warning below — the safe direction for an optional bridge.
 		if [[ -n "$exe" && -e "$exe" ]]; then
 			local ffmpeg_bin="${SCRIBE_FFMPEG_BIN:-ffmpeg}"
 			if command -v "$ffmpeg_bin" >/dev/null 2>&1; then

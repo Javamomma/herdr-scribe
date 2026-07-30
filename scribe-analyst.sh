@@ -58,13 +58,16 @@ write_offset() {
 }
 
 # Current size (bytes) of the transcript, or 0 if it doesn't exist yet.
+# Hardened against the stop/abort race: the file can vanish between the -f
+# test and the read (meeting destroyed mid-tick). Under pipefail that failed
+# `wc` would otherwise abort the tick with an empty value; normalize to 0.
 transcript_size() {
 	local t="${1:?}"
+	local n=""
 	if [[ -f "$t" ]]; then
-		wc -c < "$t" 2>/dev/null | tr -d '[:space:]'
-	else
-		echo 0
+		n="$(wc -c < "$t" 2>/dev/null | tr -d '[:space:]' || true)"
 	fi
+	echo "${n:-0}"
 }
 
 # Best-effort capture of optional screen-OCR context (see

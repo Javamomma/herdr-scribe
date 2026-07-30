@@ -36,7 +36,8 @@ if have "${llm_parts[0]}"; then ok "LLM command: ${llm_parts[*]}"
 echo ""
 echo "== Automated checks =="
 if python3 -m pytest tests/ -q >/tmp/scribe-smoke-pytest.log 2>&1; then
-  ok "unit suite ($(grep -oE '[0-9]+ passed' /tmp/scribe-smoke-pytest.log | tail -1))"
+  # Guard the grep pipe: under pipefail a no-match grep fails the substitution.
+  ok "unit suite ($(grep -oE '[0-9]+ passed' /tmp/scribe-smoke-pytest.log | tail -1 || true))"
 else
   bad "unit suite FAILED — see /tmp/scribe-smoke-pytest.log"; fi
 if bash scripts/sanitization-gate.sh >/tmp/scribe-smoke-gate.log 2>&1; then

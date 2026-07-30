@@ -87,7 +87,12 @@ if [[ ! -f "$TRANSCRIPT" ]]; then
 	exit 1
 fi
 
-TEXT="$(cat "$TRANSCRIPT")"
+# Guarded read: the file was checked above, but it can vanish in the gap
+# (stop/abort race). Fail with a message rather than a silent set -e exit.
+TEXT="$(cat "$TRANSCRIPT")" || {
+	echo "scribe-notes: transcript unreadable: $TRANSCRIPT" >&2
+	exit 1
+}
 PROMPT_BODY="$(build_prompt "$TEXT")"
 LLM_CMD="${SCRIBE_LLM_CMD:-claude -p}"
 OUT="$(note_path "$TRANSCRIPT")"
