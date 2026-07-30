@@ -1248,3 +1248,388 @@ def test_doc2text_extractor_runtime_failure_is_loud_nonzero(tmp_path):
     )
     assert result.returncode != 0
     assert "extractor failed" in result.stderr
+
+
+# --- §1 two-tier analyst: trigger contract (light tier) ---
+
+def test_trigger_parsed_from_brief():
+    out = run_analyst(
+        ["--extract-trigger"],
+        stdin="Now: things\nRETRIEVE: what does section 4 say\nWatch: x\n",
+    )
+    assert out.returncode == 0
+    assert out.stdout.strip() == "what does section 4 say"
+
+
+def test_trigger_absent_yields_nothing():
+    out = run_analyst(["--extract-trigger"], stdin="Now: things\nWatch: x\n")
+    assert out.returncode == 0
+    assert out.stdout.strip() == ""
+
+
+def test_trigger_malformed_yields_nothing():
+    """Garbled trigger lines degrade to 'no retrieval this cycle'."""
+    malformed = (
+        "RETRIEVE:\n"            # no query
+        "RETRIEVE: \n"           # blank query
+        "xRETRIEVE: query\n"     # not anchored at line start
+        "  RETRIEVE: query\n"    # indented (as in the prompt's own example)
+    )
+    out = run_analyst(["--extract-trigger"], stdin=malformed)
+    assert out.returncode == 0
+    assert out.stdout.strip() == ""
+
+
+def test_trigger_at_most_one_parsed():
+    out = run_analyst(
+        ["--extract-trigger"],
+        stdin="RETRIEVE: first query\nRETRIEVE: second query\n",
+    )
+    assert out.stdout.strip() == "first query"
+
+
+def test_trigger_line_stripped_from_pane_output(tmp_path):
+    """The trigger is control data: it must never reach the pane file."""
+    transcript = tmp_path / "t.md"
+    transcript.write_text("[me] see clause four of the handbook\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(
+        llm, "printf 'Now: clause talk\\nRETRIEVE: handbook clause four\\n'"
+    )
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={"SCRIBE_LLM_CMD": str(llm)},
+    )
+    assert result.returncode == 0
+    pane = out.read_text()
+    assert "Now: clause talk" in pane
+    assert "RETRIEVE" not in pane
+
+
+# --- §1 deep tier: locking, coalescing, drain ---
+
+def wait_for(predicate, timeout=8.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_deep_submit_single_flight_and_pending_coalesces(tmp_path):
+    """A second trigger while one retrieval is in flight lands in a single
+    coalescing pending slot — the third overwrites the second."""
+    transcript = tmp_path / "t.md"
+    transcript.write_text("x\n")
+    out = tmp_path / "brief.md"
+    env = {"SCRIBE_DEEP_WORKER_CMD": "sleep 3"}
+
+    first = run_analyst(
+        ["--deep-submit", str(transcript), str(out), "query one"], env=env
+    )
+    assert first.returncode == 0
+    lock = tmp_path / "brief.md.deeplock"
+    assert lock.is_dir()
+
+    run_analyst(["--deep-submit", str(transcript), str(out), "query two"], env=env)
+    run_analyst(["--deep-submit", str(transcript), str(out), "query three"], env=env)
+    pending = tmp_path / "brief.md.pending"
+    assert pending.read_text() == "query three"  # coalesced, not queued
+
+
+def test_deep_pending_drained_at_tick_top_when_lock_free(tmp_path):
+    transcript = tmp_path / "t.md"
+    transcript.write_text("")
+    out = tmp_path / "brief.md"
+    marker = tmp_path / "brief.md.marker"
+    (tmp_path / "brief.md.pending").write_text("find the clause")
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={
+            "SCRIBE_LLM_CMD": "true",
+            "SCRIBE_DEEP_WORKER_CMD": 'printf %s "$3" > "$2.marker"',
+        },
+    )
+    assert result.returncode == 0
+    assert not (tmp_path / "brief.md.pending").exists()
+    assert wait_for(marker.exists)
+    assert marker.read_text() == "find the clause"
+
+
+def test_deep_pending_not_drained_while_lock_held_live(tmp_path):
+    transcript = tmp_path / "t.md"
+    transcript.write_text("")
+    out = tmp_path / "brief.md"
+    pending = tmp_path / "brief.md.pending"
+    pending.write_text("held back")
+    lock = tmp_path / "brief.md.deeplock"
+    lock.mkdir()
+    (lock / "pid").write_text(str(os.getpid()))  # provably live
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={
+            "SCRIBE_LLM_CMD": "true",
+            "SCRIBE_DEEP_WORKER_CMD": 'printf %s "$3" > "$2.marker"',
+        },
+    )
+    assert result.returncode == 0
+    assert pending.read_text() == "held back"
+    assert not (tmp_path / "brief.md.marker").exists()
+
+
+def test_deep_stale_lock_is_reclaimed(tmp_path):
+    """A lock whose recorded worker pid is dead must not block retrievals
+    forever."""
+    transcript = tmp_path / "t.md"
+    transcript.write_text("x\n")
+    out = tmp_path / "brief.md"
+    lock = tmp_path / "brief.md.deeplock"
+    lock.mkdir()
+    # A pid that is certainly dead: spawn and reap a process.
+    proc = subprocess.run(["bash", "-c", "echo $$"], capture_output=True, text=True)
+    (lock / "pid").write_text(proc.stdout.strip())
+
+    marker = tmp_path / "brief.md.marker"
+    result = run_analyst(
+        ["--deep-submit", str(transcript), str(out), "retry query"],
+        env={"SCRIBE_DEEP_WORKER_CMD": 'printf %s "$3" > "$2.marker"'},
+    )
+    assert result.returncode == 0
+    assert wait_for(marker.exists)
+    assert marker.read_text() == "retry query"
+
+
+def test_tick_trigger_dispatches_deep_worker_when_enabled(tmp_path):
+    transcript = tmp_path / "t.md"
+    transcript.write_text("[me] check the handbook\n")
+    out = tmp_path / "brief.md"
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, "printf 'Now: x\\nRETRIEVE: handbook clause\\n'")
+    marker = tmp_path / "brief.md.marker"
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={
+            "SCRIBE_LLM_CMD": str(llm),
+            "SCRIBE_DEEP_CORPUS_ROOT": str(corpus),
+            "SCRIBE_DEEP_WORKER_CMD": 'printf %s "$3" > "$2.marker"',
+        },
+    )
+    assert result.returncode == 0
+    assert wait_for(marker.exists)
+    assert marker.read_text() == "handbook clause"
+
+
+def test_tick_trigger_ignored_when_deep_disabled(tmp_path):
+    """No corpus root configured → the trigger is parsed and stripped but
+    dispatches nothing: a fresh install behaves exactly as today."""
+    transcript = tmp_path / "t.md"
+    transcript.write_text("[me] check the handbook\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, "printf 'Now: x\\nRETRIEVE: handbook clause\\n'")
+
+    result = run_analyst(
+        ["--analyst-once", str(transcript), str(out)],
+        env={
+            "SCRIBE_LLM_CMD": str(llm),
+            "SCRIBE_DEEP_WORKER_CMD": 'printf %s "$3" > "$2.marker"',
+        },
+    )
+    assert result.returncode == 0
+    time.sleep(0.3)
+    assert not (tmp_path / "brief.md.marker").exists()
+    assert not (tmp_path / "brief.md.deeplock").exists()
+
+
+# --- §1 deep tier: the worker itself ---
+
+def test_deep_worker_quotes_source_verbatim_with_path(tmp_path):
+    """With a passthrough LLM stub, the appended block carries the corpus
+    text, the source path, and the verbatim/no-fabrication instructions."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "handbook.txt").write_text("The alpha clause says: forty-two.\n")
+    (corpus / "other.txt").write_text("Unrelated content.\n")
+    transcript = tmp_path / "t.md"
+    transcript.write_text("x\n")
+    out = tmp_path / "brief.md"
+
+    result = run_analyst(
+        ["--deep-worker", str(transcript), str(out), "alpha clause"],
+        env={
+            "SCRIBE_DEEP_CORPUS_ROOT": str(corpus),
+            "SCRIBE_LLM_CMD_DEEP": "cat",
+        },
+    )
+    assert result.returncode == 0
+    deep = (tmp_path / "brief.md.deep").read_text()
+    assert "--- retrieved: alpha clause ---" in deep
+    assert "The alpha clause says: forty-two." in deep
+    assert str(corpus / "handbook.txt") in deep
+    assert "VERBATIM" in deep
+    assert "Never fabricate" in deep
+    # rendered pane picked the block up even with no light brief yet
+    assert "alpha clause" in out.read_text()
+    # the in-flight lock is released on worker exit
+    assert not (tmp_path / "brief.md.deeplock").exists()
+    # no scratch left behind
+    leftovers = [p.name for p in tmp_path.glob(".deep-*")]
+    assert leftovers == []
+
+
+def test_deep_worker_no_match_says_so(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text("nothing relevant here\n")
+    out = tmp_path / "brief.md"
+    result = run_analyst(
+        ["--deep-worker", str(tmp_path / "t.md"), str(out), "zzqy unfindable"],
+        env={
+            "SCRIBE_DEEP_CORPUS_ROOT": str(corpus),
+            "SCRIBE_LLM_CMD_DEEP": "cat",
+        },
+    )
+    assert result.returncode == 0
+    deep = (tmp_path / "brief.md.deep").read_text()
+    assert "No corpus document matched" in deep
+
+
+def test_deep_worker_timeout_appends_failure_and_survives(tmp_path):
+    """A hung retrieval is hard-killed; the failure is loud in the pane and
+    the worker still exits 0 (the loop must survive)."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text("alpha clause content\n")
+    out = tmp_path / "brief.md"
+
+    started = time.time()
+    result = run_analyst(
+        ["--deep-worker", str(tmp_path / "t.md"), str(out), "alpha clause"],
+        env={
+            "SCRIBE_DEEP_CORPUS_ROOT": str(corpus),
+            "SCRIBE_LLM_CMD_DEEP": "sleep 30",
+            "SCRIBE_DEEP_TIMEOUT": "1",
+        },
+    )
+    elapsed = time.time() - started
+    assert result.returncode == 0
+    assert elapsed < 15
+    deep = (tmp_path / "brief.md.deep").read_text()
+    assert "RETRIEVAL FAILED" in deep
+    assert not (tmp_path / "brief.md.deeplock").exists()
+
+
+def test_deep_malformed_timeout_falls_back_with_warning(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text("alpha content\n")
+    out = tmp_path / "brief.md"
+    result = run_analyst(
+        ["--deep-worker", str(tmp_path / "t.md"), str(out), "alpha"],
+        env={
+            "SCRIBE_DEEP_CORPUS_ROOT": str(corpus),
+            "SCRIBE_LLM_CMD_DEEP": "cat",
+            "SCRIBE_DEEP_TIMEOUT": "not-a-number",
+        },
+    )
+    assert result.returncode == 0
+    assert "not-a-number" in result.stderr  # loud fallback, not silence
+
+
+# --- §1 rendering: composition, bound, no-clobber ---
+
+def _deep_block(query, body):
+    return f"--- retrieved: {query} ---\n{body}\n"
+
+
+def test_render_bounds_deep_blocks_and_states_the_bound(tmp_path):
+    out = tmp_path / "brief.md"
+    (tmp_path / "brief.md.brief").write_text("Now: current state\n")
+    blocks = "".join(_deep_block(f"q{i}", f"answer {i}") for i in range(1, 6))
+    (tmp_path / "brief.md.deep").write_text(blocks)
+
+    result = run_analyst(["--render", str(out)])
+    assert result.returncode == 0
+    text = out.read_text()
+    assert "Now: current state" in text
+    assert "showing last 3 of 5" in text  # the bound is stated, not silent
+    assert "answer 5" in text and "answer 4" in text and "answer 3" in text
+    assert "answer 1" not in text and "answer 2" not in text
+
+
+def test_light_rewrite_does_not_clobber_deep_blocks(tmp_path):
+    """The review finding the render step exists to fix: a new light tick
+    must re-render the pane WITH the previously retrieved blocks."""
+    transcript = tmp_path / "t.md"
+    transcript.write_text("[me] first\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "BRIEF: %s" "$input"')
+    env = {"SCRIBE_LLM_CMD": str(llm)}
+
+    run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    # a deep block lands between ticks
+    (tmp_path / "brief.md.deep").write_text(_deep_block("q", "the verbatim passage"))
+    with transcript.open("a") as f:
+        f.write("[me] second\n")
+    run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+
+    text = out.read_text()
+    assert "second" in text                 # fresh brief
+    assert "the verbatim passage" in text   # deep block preserved
+
+
+def test_quiet_tick_still_surfaces_new_deep_block(tmp_path):
+    """A deep block that lands during a silent meeting must reach the pane
+    on the next tick even though the brief itself is not rewritten."""
+    transcript = tmp_path / "t.md"
+    transcript.write_text("[me] only line\n")
+    out = tmp_path / "brief.md"
+    llm = tmp_path / "llm-stub.sh"
+    write_stub_hook(llm, 'input="$(cat)"; printf "BRIEF: %s" "$input"')
+    env = {"SCRIBE_LLM_CMD": str(llm)}
+
+    run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    time.sleep(0.05)
+    (tmp_path / "brief.md.deep").write_text(_deep_block("q", "late block"))
+    # no new transcript content: quiet tick
+    run_analyst(["--analyst-once", str(transcript), str(out)], env=env)
+    assert "late block" in out.read_text()
+
+
+def test_concurrent_deep_appends_do_not_interleave(tmp_path):
+    """Two writers hammering the deep file must serialize per-block. Written
+    per the §6.1 pattern: both writers take their content as FILES and are
+    started before either is waited on — no lock-then-stdin coupling."""
+    out = tmp_path / "brief.md"
+    block_a = tmp_path / "block-a.txt"
+    block_b = tmp_path / "block-b.txt"
+    block_a.write_text("--- retrieved: qa ---\n" + "A" * 400 + "\n")
+    block_b.write_text("--- retrieved: qb ---\n" + "B" * 400 + "\n")
+
+    script = (
+        f'for i in $(seq 20); do '
+        f'bash "{ANALYST_SCRIPT}" --append-deep "{out}" "$1"; done'
+    )
+    procs = [
+        subprocess.Popen(["bash", "-c", script, "_", str(f)])
+        for f in (block_a, block_b)
+    ]
+    for p in procs:
+        assert p.wait(timeout=60) == 0
+
+    lines = (tmp_path / "brief.md.deep").read_text().splitlines()
+    delimiters = [l for l in lines if l.startswith("--- retrieved:")]
+    assert len(delimiters) == 40
+    for line in lines:
+        if line.startswith("---"):
+            continue
+        assert not ("A" in line and "B" in line), "interleaved append detected"
+        assert len(line) == 400
