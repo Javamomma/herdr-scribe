@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""scribe-artifacts — deterministic, ZERO-MODEL review surface for the
+auto-artifacts system (§4e-§4h).
+
+This process never invokes a model — it reads and edits local files and
+dispatches the separate scribe-artifacts-build process. A test scans this
+source (and scribe_artifacts_lib.py) to keep it that way.
+
+Usage:
+  scribe-artifacts [<meeting>]                     render the review view
+  scribe-artifacts [<meeting>] --approve <id>...   build queued candidate(s)
+  scribe-artifacts [<meeting>] --approve-all
+  scribe-artifacts --all                           bounded cross-meeting summary
+  scribe-artifacts pane [<meeting>]                interactive review pane
+  scribe-artifacts mark <meeting> <id> <disposition>   (internal/maintenance)
+
+Exit codes: 0 ok · 1 operational failure · 2 bad id / unresolvable request.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import scribe_artifacts_lib as lib
+
+
+def die(message, code=2):
+    print(f"scribe-artifacts: error: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def cmd_render(meeting_query):
+    try:
+        meeting = lib.resolve_meeting(meeting_query)
+    except lib.ArtifactsError as exc:
+        die(str(exc))
+    lib.render_view(meeting)
+    return 0
+
+
+def cmd_approve(meeting_query, ids):
+    if not ids:
+        die("--approve requires at least one id")
+    try:
+        meeting = lib.resolve_meeting(meeting_query)
+        failures = lib.approve(meeting, ids)
+    except lib.ArtifactsError as exc:
+        # One bad id → zero builds; errors to stderr, nothing on stdout,
+        # distinct exit status (§4f).
+        die(str(exc))
+    return 1 if failures else 0
+
+
+def cmd_approve_all(meeting_query):
+    try:
+        meeting = lib.resolve_meeting(meeting_query)
+    except lib.ArtifactsError as exc:
+        die(str(exc))
+    state, candidates = lib.load_sidecar(meeting)
+    if state == "absent":
+        die(f"no sidecar for meeting '{meeting}' — log-derived views are not approvable")
+    if state == "unreadable":
+        die(f"sidecar for meeting '{meeting}' exists but cannot be read", code=1)
+    queued = [c.id for c in candidates if c.disposition in lib.QUEUED_DISPOSITIONS]
+    if not queued:
+        print("Nothing queued for approval.")
+        return 0
+    try:
+        failures = lib.approve(meeting, queued)
+    except lib.ArtifactsError as exc:
+        die(str(exc))
+    return 1 if failures else 0
+
+
+def cmd_mark(argv):
+    if len(argv) != 3:
+        die("usage: scribe-artifacts mark <meeting> <id> <disposition>")
+    meeting, target_id, disposition = argv
+    # Validate against the closed vocabulary — an unvalidated value would let
+    # a caller write an arbitrary string, or one containing a separator that
+    # shifts the row's columns (§4g).
+    if disposition not in lib.DISPOSITIONS:
+        die(f"invalid disposition {disposition!r} (valid: {', '.join(lib.DISPOSITIONS)})")
+    try:
+        lib.edit_sidecar_disposition(meeting, target_id, disposition)
+    except lib.ArtifactsError as exc:
+        die(str(exc))
+    return 0
+
+
+def cmd_pane(meeting_query):
+    """Interactive review pane (§4h): a pure read-and-prompt loop.
+      - zero model calls (this whole process makes none);
+      - EOF on stdin (pane closed) exits 0;
+      - unknown input re-prompts, never exits or spins;
+      - input is never word-split by a shell or glob-expanded.
+    Builds land minutes after stop, so rows may read 'building…' at first —
+    type 'refresh' to re-render."""
+    try:
+        meeting = lib.resolve_meeting(meeting_query)
+    except lib.ArtifactsError as exc:
+        print(f"scribe-artifacts: {exc}", file=sys.stderr)
+        return 0  # purely additive: the pane must never fail anything upstream
+
+    lib.render_view(meeting)
+    print("\ncommands: approve <id>... | all | refresh | quit")
+    while True:
+        try:
+            line = input("artifacts> ")
+        except EOFError:
+            return 0  # pane closed
+        except KeyboardInterrupt:
+            return 0
+        words = line.strip().split()
+        if not words:
+            continue
+        verb = words[0].lower()
+        if verb in ("quit", "q", "exit"):
+            return 0
+        if verb == "refresh":
+            lib.render_view(meeting)
+            continue
+        if verb == "all":
+            try:
+                state, candidates = lib.load_sidecar(meeting)
+                queued = [c.id for c in candidates
+                          if c.disposition in lib.QUEUED_DISPOSITIONS]
+                if not queued:
+                    print("Nothing queued for approval.")
+                    continue
+                lib.approve(meeting, queued)
+            except lib.ArtifactsError as exc:
+                print(f"error: {exc}")
+            continue
+        if verb == "approve":
+            ids = words[1:]
+            if not ids:
+                print("usage: approve <id>...")
+                continue
+            try:
+                lib.approve(meeting, ids)
+            except lib.ArtifactsError as exc:
+                print(f"error: {exc}")
+            continue
+        print("commands: approve <id>... | all | refresh | quit")
+
+
+def main(argv):
+    if argv and argv[0] == "pane":
+        return cmd_pane(argv[1] if len(argv) > 1 else None)
+    if argv and argv[0] == "mark":
+        return cmd_mark(argv[1:])
+
+    meeting_query = None
+    approve_ids = []
+    mode = "render"
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--approve":
+            mode = "approve"
+            i += 1
+            while i < len(argv) and not argv[i].startswith("--"):
+                approve_ids.append(argv[i])
+                i += 1
+            continue
+        if arg == "--approve-all":
+            mode = "approve-all"
+            i += 1
+            continue
+        if arg == "--all":
+            mode = "all"
+            i += 1
+            continue
+        if arg.startswith("--"):
+            die(f"unknown option {arg}")
+        if meeting_query is not None:
+            die(f"more than one meeting argument ({meeting_query!r}, {arg!r})")
+        meeting_query = arg
+        i += 1
+
+    if mode == "all":
+        return lib.render_all()
+    if mode == "approve":
+        return cmd_approve(meeting_query, approve_ids)
+    if mode == "approve-all":
+        return cmd_approve_all(meeting_query)
+    return cmd_render(meeting_query)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

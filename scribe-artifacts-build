@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""scribe-artifacts-build — classifier + builder for auto-artifacts (§4a-§4d).
+
+This is the ONLY artifacts process that invokes a model. The review surface
+(scribe-artifacts) is zero-model and dispatches this as a detached process.
+
+Subcommands:
+
+  classify --meeting <id> --note <path>
+      Run the classifier over the NOTE (never the transcript — deriving
+      documents from raw ASR output propagates recognition errors into
+      deliverables). Emits every candidate to the per-meeting sidecar —
+      built and skipped alike — then dispatches detached builds for the
+      strong candidates within the cap. Sidecar failure warns and NEVER
+      suppresses the classification output.
+
+  build --meeting <id> --id <n> --note <path> --type <t>
+        [--scope <s>] [--audience <a>] [--topic <t>]
+      Build one artifact draft: idempotent on (note, type, topic); refuses
+      a missing note; on success appends the run-log line, back-links the
+      draft into the note, and opens a review-task row so an unreviewed
+      draft cannot go unnoticed. The draft is NEVER transmitted anywhere —
+      no mail, no upload, no post; it is a local file for a human to review.
+
+Classifier output contract: the model must emit ONE line
+
+    SCRIBE-CANDIDATES: <json array>
+
+where each element is {"type","scope","audience","topic","trigger_class"}
+with trigger_class ∈ explicit|confident|weak. Everything about the parse is
+defensive: no sentinel line, invalid JSON, not-a-list, list-of-non-objects,
+and missing keys all degrade to "no candidates" — never a crash (§4a).
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import scribe_artifacts_lib as lib
+
+SENTINEL = "SCRIBE-CANDIDATES:"
+STRONG_TRIGGERS = ("explicit", "confident")
+TRIGGER_CLASSES = ("explicit", "confident", "weak")
+
+
+def llm_cmd():
+    return os.environ.get("SCRIBE_LLM_CMD") or "claude -p"
+
+
+def run_llm(prompt):
+    """Run the configured model command with the prompt on stdin, capturing
+    stdout to a FILE (a command-substitution-style pipe would be held open
+    by any orphaned grandchild of a slow command). Returns text or None."""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as out:
+        try:
+            proc = subprocess.run(
+                ["bash", "-c", llm_cmd()],
+                input=prompt.encode("utf-8"),
+                stdout=out,
+                stderr=subprocess.DEVNULL,
+                timeout=int(os.environ.get("SCRIBE_CLASSIFY_TIMEOUT") or 300),
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            print(f"scribe-artifacts-build: model command failed: {exc}", file=sys.stderr)
+            return None
+        if proc.returncode != 0:
+            print(
+                f"scribe-artifacts-build: model command exited {proc.returncode}",
+                file=sys.stderr,
+            )
+            return None
+        out.seek(0)
+        return out.read()
+
+
+# --- classify ------------------------------------------------------------
+
+CLASSIFY_PROMPT = """You are a meeting-note classifier. Read the meeting note below and decide
+which follow-up documents the meeting implies should be DRAFTED. Typical
+candidates: a summary for an absent audience, a status update, a proposal or
+decision memo, a checklist, follow-up questions. Propose only what the note
+actually implies; propose nothing when nothing is implied.
+
+Reply with exactly ONE line of the form (no other text on that line):
+
+SCRIBE-CANDIDATES: [{{"type": "...", "scope": "...", "audience": "...", "topic": "...", "trigger_class": "..."}}]
+
+- type: short kebab-case artifact kind (e.g. summary, status-update, memo)
+- scope: the work item this belongs to, from the note's own context ("" if unclear)
+- audience: who the document is for
+- topic: short human label for this specific document
+- trigger_class: "explicit" (the meeting said to write it), "confident"
+  (strongly implied), or "weak" (possible but uncertain)
+
+--- meeting note ---
+{note}
+"""
+
+
+def parse_candidates(model_text):
+    """Defensive parse of the sentinel payload (§4a): every malformed shape
+    degrades to no candidates, never a crash."""
+    if not model_text:
+        return []
+    payload = None
+    for line in model_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(SENTINEL):
+            payload = stripped[len(SENTINEL):].strip()
+            break
+    if payload is None:
+        return []
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    parsed = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        trigger = str(item.get("trigger_class", "") or "weak")
+        if trigger not in TRIGGER_CLASSES:
+            trigger = "weak"  # unknown strength is treated conservatively
+        parsed.append(
+            {
+                "type": str(item.get("type", "") or "").strip() or "document",
+                "scope": str(item.get("scope", "") or "").strip(),
+                "audience": str(item.get("audience", "") or "").strip(),
+                "topic": str(item.get("topic", "") or "").strip() or "untitled",
+                "trigger_class": trigger,
+            }
+        )
+    return parsed
+
+
+def cmd_classify(args):
+    try:
+        with open(args.note, "r", encoding="utf-8") as f:
+            note_text = f.read()
+    except OSError as exc:
+        print(f"scribe-artifacts-build: cannot read note: {exc}", file=sys.stderr)
+        return 1
+
+    model_text = run_llm(CLASSIFY_PROMPT.format(note=note_text))
+    raw_candidates = parse_candidates(model_text)
+
+    cap = lib.parse_cap()
+    allowed = lib.enabled_types()
+
+    candidates = []
+    built_count = 0
+    to_build = []
+    for i, raw in enumerate(raw_candidates, 1):
+        # The id is assigned BEFORE the disposition branch, to every
+        # candidate including skipped ones (§4c).
+        cand = lib.Candidate(
+            id=str(i),
+            disposition="",
+            type=raw["type"],
+            scope=raw["scope"],
+            audience=raw["audience"],
+            topic=raw["topic"],
+            trigger_class=raw["trigger_class"],
+            note_path=args.note,
+        )
+        if allowed is not None and cand.type not in allowed:
+            cand.disposition = "disabled-type"
+        elif cand.trigger_class not in STRONG_TRIGGERS:
+            cand.disposition = "weaker-trigger"
+        elif lib.last_outcome(cand.note_path, cand.type, cand.topic) is not None and \
+                lib.last_outcome(cand.note_path, cand.type, cand.topic)["event"] == "built":
+            # Already built for this exact (note, type, topic): idempotent,
+            # consumes no cap budget.
+            cand.disposition = "built"
+        elif built_count < cap:
+            cand.disposition = "built"
+            built_count += 1  # only an actual build consumes cap budget
+            to_build.append(cand)
+        else:
+            cand.disposition = "over-cap"
+        candidates.append(cand)
+
+    # Sidecar write failure warns and continues — classification output must
+    # still be produced in full (§4c).
+    lib.write_sidecar(args.meeting, candidates)
+
+    for cand in candidates:
+        print(f"candidate {cand.id}: {cand.disposition} {cand.type} — {cand.topic}")
+    if not candidates:
+        print("no artifact candidates")
+
+    for cand in to_build:
+        try:
+            lib.dispatch_build(args.meeting, cand)
+        except OSError as exc:
+            print(
+                f"scribe-artifacts-build: dispatch failed for id {cand.id}: {exc}",
+                file=sys.stderr,
+            )
+    return 0
+
+
+# --- build ---------------------------------------------------------------
+
+GENERATOR_PROMPT = """You draft documents implied by meeting notes. Draft the document described
+below, based only on the meeting note that follows. This is an UNSENT DRAFT
+for a human to review: do not transmit, send, mail, upload, or post anything;
+produce only the document text.
+
+Document kind: {type}
+Audience: {audience}
+Topic: {topic}
+Work item: {scope}
+
+--- meeting note ---
+{note}
+"""
+
+
+def default_generate(args, note_text, out_path):
+    prompt = GENERATOR_PROMPT.format(
+        type=args.type, audience=args.audience or "(unspecified)",
+        topic=args.topic, scope=args.scope or "(unspecified)", note=note_text,
+    )
+    text = run_llm(prompt)
+    if text is None or not text.strip():
+        return False
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(out_path), prefix=".draft-")
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp_path, out_path)
+    return True
+
+
+def custom_generate(cmd, args, out_path):
+    """SCRIBE_ARTIFACT_GENERATOR_CMD seam: the command receives
+    type/scope/audience/topic/note-path as $1..$5 and must print the
+    document to stdout."""
+    with open(out_path + ".tmp", "w", encoding="utf-8") as out:
+        try:
+            proc = subprocess.run(
+                ["bash", "-c", cmd, "_", args.type, args.scope, args.audience,
+                 args.topic, args.note],
+                stdout=out,
+                stderr=subprocess.DEVNULL,
+                timeout=int(os.environ.get("SCRIBE_CLASSIFY_TIMEOUT") or 300),
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            proc = None
+    if proc is None or proc.returncode != 0 or not os.path.getsize(out_path + ".tmp"):
+        try:
+            os.unlink(out_path + ".tmp")
+        except OSError:
+            pass
+        return False
+    os.replace(out_path + ".tmp", out_path)
+    return True
+
+
+def cmd_build(args):
+    # Idempotent: approval retries and double-clicks are normal (§4d).
+    existing = lib.last_outcome(args.note, args.type, args.topic)
+    if existing is not None and existing["event"] == "built":
+        print(f"already built: {existing['artifact_path']}")
+        return 0
+
+    if not args.note or not os.path.isfile(args.note):
+        lib.append_run_log(
+            "build-failed", args.note, args.type, args.topic,
+            detail="source note missing at build time",
+        )
+        print(
+            f"scribe-artifacts-build: id {args.id}: source note not found at "
+            f"'{args.note}' — not building",
+            file=sys.stderr,
+        )
+        return 1
+
+    with open(args.note, "r", encoding="utf-8") as f:
+        note_text = f.read()
+
+    out_root = lib.artifact_out_dir()
+    os.makedirs(out_root, exist_ok=True)
+    out_path = os.path.join(
+        out_root,
+        f"{args.meeting}-{lib.slugify(args.type)}-{lib.slugify(args.topic)}.md",
+    )
+
+    generator = os.environ.get("SCRIBE_ARTIFACT_GENERATOR_CMD", "")
+    if generator:
+        ok = custom_generate(generator, args, out_path)
+    else:
+        ok = default_generate(args, note_text, out_path)
+
+    if not ok:
+        lib.append_run_log(
+            "build-failed", args.note, args.type, args.topic,
+            detail="generator failed or produced nothing",
+        )
+        print(f"scribe-artifacts-build: generator failed for id {args.id}",
+              file=sys.stderr)
+        return 1
+
+    # Success bookkeeping: run-log line, back-link into the note, review
+    # task — so an unreviewed draft cannot go unnoticed (§4d).
+    lib.append_run_log("built", args.note, args.type, args.topic, out_path)
+    try:
+        with open(args.note, "a", encoding="utf-8") as f:
+            f.write(f"\n> draft: {out_path}\n")
+    except OSError as exc:
+        print(f"scribe-artifacts-build: warning: could not back-link into note: {exc}",
+              file=sys.stderr)
+    lib.append_review_task(out_path, "open")
+    print(out_path)
+    return 0
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="scribe-artifacts-build")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_classify = sub.add_parser("classify")
+    p_classify.add_argument("--meeting", required=True)
+    p_classify.add_argument("--note", required=True)
+
+    p_build = sub.add_parser("build")
+    p_build.add_argument("--meeting", required=True)
+    p_build.add_argument("--id", default="?")
+    p_build.add_argument("--note", required=True)
+    p_build.add_argument("--type", required=True)
+    p_build.add_argument("--scope", default="")
+    p_build.add_argument("--audience", default="")
+    p_build.add_argument("--topic", default="")
+
+    args = parser.parse_args(argv)
+    if args.command == "classify":
+        return cmd_classify(args)
+    return cmd_build(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

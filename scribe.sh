@@ -299,6 +299,23 @@ audit() {
 	return 0
 }
 
+# §4h best-effort review pane: PURELY ADDITIVE — it must never make stop
+# fail, hang, or alter anything that ran before it, so every multiplexer
+# call is wrapped in a hard timeout with a kill-after (a multiplexer binary
+# that ignores the first signal would otherwise hang stop forever).
+open_review_pane() {
+	local id="${1:?}"
+	if [[ "${SCRIBE_REVIEW_PANE:-1}" == "0" ]]; then
+		return 0
+	fi
+	if [[ -z "${TMUX:-}" ]] || ! command -v tmux >/dev/null 2>&1; then
+		return 0
+	fi
+	run_with_timeout 5 tmux split-window -d \
+		"python3 '$HERE/scribe-artifacts' pane '$id'" 2>/dev/null || true
+	return 0
+}
+
 # Meeting lifecycle: start / status / abort / stop
 
 start() {
@@ -452,6 +469,9 @@ stop() {
 	local out
 	out="$(out_dir)/$id.md"
 	cp "$dir/transcript.md" "$out"
+	# Remember the most recent stop for surfaces that open afterwards (the
+	# artifacts review pane) — best-effort, never fatal.
+	printf '%s' "$id" > "$(out_dir)/.last-meeting" 2>/dev/null || true
 
 	if [[ -f "$dir/capture.pid" ]]; then
 		kill "$(cat "$dir/capture.pid")" 2>/dev/null || true
@@ -541,6 +561,22 @@ stop() {
 	fi
 	clear_current_if_matches "$id"
 
+	# §4: artifact classification — only when the operator turned artifacts
+	# on, and only after a clear verdict (a held meeting classifies nothing).
+	# Synchronous like the note step, so the review surface has a sidecar
+	# the moment stop returns; the builds it dispatches are detached. The
+	# classifier reads the NOTE, never the transcript.
+	if [[ "${SCRIBE_ARTIFACTS:-0}" == "1" && -f "$(out_dir)/$id.note.md" ]]; then
+		local classify_timeout
+		classify_timeout="$(validated_number "${SCRIBE_CLASSIFY_TIMEOUT:-300}" 300 "SCRIBE_CLASSIFY_TIMEOUT")"
+		if ! run_with_timeout "$classify_timeout" python3 "$HERE/scribe-artifacts-build" classify --meeting "$id" --note "$(out_dir)/$id.note.md" >&2; then
+			echo "stop: warning: artifact classification failed for $id" >&2
+		fi
+		open_review_pane "$id"
+		# Always print the fallback hint, whether or not a pane opened (§4h).
+		echo "stop: review artifact candidates with: scribe.sh artifacts $id" >&2
+	fi
+
 	# Downstream hook, only after a clear verdict (§5: "then, and only
 	# then"). Fail-safe: the transcript is already durable.
 	local hook="${SCRIBE_ON_STOP:-}"
@@ -618,5 +654,9 @@ case "${1:-}" in
 		shift
 		abort "$@"
 		exit $?
+		;;
+	artifacts)
+		shift
+		exec python3 "$HERE/scribe-artifacts" "$@"
 		;;
 esac

@@ -122,6 +122,18 @@ command = [
   "T=\"$(bash scribe.sh --current-transcript)\"; A=\"$(bash scribe.sh --current-analyst)\"; bash scribe-analyst.sh \"$T\" \"$A\" --interval \"${SCRIBE_ANALYST_INTERVAL:-60}\" & tail -n +1 -f \"$A\""
 ]
 
+[[panes]]
+id = "artifacts"
+title = "Scribe: artifact review"
+contexts = ["workspace"]
+open_on = ["stop"]
+# Zero-model interactive review of the auto-drafted artifact candidates for
+# the meeting that just stopped (reads <output-dir>/.last-meeting). Only
+# meaningful when SCRIBE_ARTIFACTS=1; with artifacts off it reports "no
+# meetings on record" and exits quietly. Commands inside the pane:
+#   approve <id>... | all | refresh | quit
+command = ["bash", "-c", "python3 scribe-artifacts pane"]
+
 # --- Optional host bridges (gated, degrade gracefully) ----------------------
 # Neither bridge is required. Run `scribe.sh --doctor` any time to see which
 # of them are currently available; missing bridges never break a meeting —
