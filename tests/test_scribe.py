@@ -2502,7 +2502,7 @@ def test_compose_forced_avfoundation_backend(tmp_path):
     )
     out = result.stdout
     assert "-f avfoundation" in out
-    assert '":0"' in out
+    assert '":default"' in out  # tracks the system-default input device
     assert "-f s16le -ar 16000 -ac 1" in out
     assert "scribe-transcribe.py" in out
     assert "parec" not in out
@@ -2565,3 +2565,52 @@ def test_live_capture_pipeline_status_stays_quiet(tmp_path):
     assert status.stdout.strip() == meeting_id
     assert "NOT running" not in status.stderr
     run(["abort"], env=env)
+
+
+# --- macOS system-audio loopback ([them] via virtual input) ---
+
+def test_compose_teams_avfoundation_uses_loopback_source(tmp_path):
+    """SCRIBE_LOOPBACK_SOURCE names a virtual input (e.g. BlackHole); with
+    --teams it becomes the [them] stream through the same s16le/16k/mono
+    contract — the macOS analog of the Windows loopback exe."""
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path),
+             "SCRIBE_CAPTURE_BACKEND": "avfoundation",
+             "SCRIBE_TEAMS": "1",
+             "SCRIBE_LOOPBACK_SOURCE": "BlackHole 2ch"},
+    )
+    out = result.stdout
+    assert '":BlackHole 2ch"' in out
+    assert "--channel them" in out
+    assert out.count("-f s16le -ar 16000 -ac 1") == 2  # both streams resampled
+
+
+def test_compose_teams_avfoundation_without_loopback_warns_mic_only(tmp_path):
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path),
+             "SCRIBE_CAPTURE_BACKEND": "avfoundation",
+             "SCRIBE_TEAMS": "1",
+             "SCRIBE_LOOPBACK_SOURCE": "",
+             "SCRIBE_LOOPBACK_EXE": ""},
+    )
+    assert "--channel them" not in result.stdout
+    assert "falling back to mic-only" in result.stderr
+
+
+def test_compose_loopback_source_beats_windows_exe(tmp_path):
+    """When both are configured, the native virtual-input path wins (no
+    resample hop through the exe)."""
+    exe = tmp_path / "loopback.exe"
+    exe.write_text("x")
+    result = run(
+        ["--compose-capture", "m1"],
+        env={"SCRIBE_RAMROOT": str(tmp_path),
+             "SCRIBE_CAPTURE_BACKEND": "avfoundation",
+             "SCRIBE_TEAMS": "1",
+             "SCRIBE_LOOPBACK_SOURCE": "BlackHole 2ch",
+             "SCRIBE_LOOPBACK_EXE": str(exe)},
+    )
+    assert '":BlackHole 2ch"' in result.stdout
+    assert "loopback.exe" not in result.stdout

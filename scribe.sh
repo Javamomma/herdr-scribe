@@ -196,12 +196,15 @@ compose_capture() {
 	# the pulse default alias means "unset" there.
 	local backend mic_cmd
 	backend="$(capture_backend)"
+	local av_ffmpeg="${SCRIBE_FFMPEG_BIN:-ffmpeg}"
 	if [[ "$backend" == "avfoundation" ]]; then
+		# ":default" tracks the system-default input (System Settings →
+		# Sound), which stays correct when devices come and go; a numeric
+		# index is only stable until the device list changes.
 		local av_dev="$source"
 		if [[ -z "$av_dev" || "$av_dev" == "@DEFAULT_SOURCE@" ]]; then
-			av_dev=":0"
+			av_dev=":default"
 		fi
-		local av_ffmpeg="${SCRIBE_FFMPEG_BIN:-ffmpeg}"
 		mic_cmd="\"$av_ffmpeg\" -loglevel error -f avfoundation -i \"$av_dev\" -f s16le -ar 16000 -ac 1 pipe:1"
 	else
 		mic_cmd="parec --raw --format=s16le --rate=16000 --channels=1 -d \"$source\""
@@ -211,11 +214,27 @@ compose_capture() {
 	lines+=("$mic_cmd | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel me${glossary_arg} &")
 
 	if [[ "${SCRIBE_TEAMS:-0}" == "1" ]]; then
+		# macOS system-audio loopback ([them] stream): a virtual input
+		# device (e.g. BlackHole) that the host's output is routed into.
+		# SCRIBE_LOOPBACK_SOURCE names the avfoundation device; when unset
+		# but the BlackHole driver is installed, it is used automatically.
+		# This is the macOS analog of the Windows loopback exe below.
+		local loopback_source="${SCRIBE_LOOPBACK_SOURCE:-}"
+		if [[ -z "$loopback_source" && "$backend" == "avfoundation" \
+			&& -d "/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver" ]]; then
+			loopback_source="BlackHole 2ch"
+		fi
 		local exe="${SCRIBE_LOOPBACK_EXE:-}"
 		# Deliberate symlink semantics: -e follows symlinks, so a BROKEN
 		# symlink counts as "not available" and degrades to mic-only with
 		# the warning below — the safe direction for an optional bridge.
-		if [[ -n "$exe" && -e "$exe" ]]; then
+		if [[ -n "$loopback_source" ]]; then
+			if command -v "$av_ffmpeg" >/dev/null 2>&1; then
+				lines+=("\"$av_ffmpeg\" -loglevel error -f avfoundation -i \":$loopback_source\" -f s16le -ar 16000 -ac 1 pipe:1 | python3 \"$HERE/scribe-transcribe.py\" --transcript \"$transcript\" --channel them${glossary_arg} &")
+			else
+				echo "warning: --teams requested but ffmpeg (${av_ffmpeg}) was not found; cannot read the loopback device ($loopback_source) -- falling back to mic-only" >&2
+			fi
+		elif [[ -n "$exe" && -e "$exe" ]]; then
 			local ffmpeg_bin="${SCRIBE_FFMPEG_BIN:-ffmpeg}"
 			if command -v "$ffmpeg_bin" >/dev/null 2>&1; then
 				local in_fmt="${SCRIBE_LOOPBACK_FORMAT:-f32le}"
@@ -226,7 +245,7 @@ compose_capture() {
 				echo "warning: --teams requested but ffmpeg (${ffmpeg_bin}) was not found; cannot resample loopback audio to what the transcriber needs -- falling back to mic-only for the [them] stream" >&2
 			fi
 		else
-			echo "warning: --teams requested but SCRIBE_LOOPBACK_EXE not found (${exe:-<unset>}); falling back to mic-only" >&2
+			echo "warning: --teams requested but no loopback is available (SCRIBE_LOOPBACK_SOURCE unset, no BlackHole driver, SCRIBE_LOOPBACK_EXE ${exe:-<unset>}); falling back to mic-only" >&2
 		fi
 	fi
 
@@ -272,8 +291,14 @@ doctor() {
 	echo "  ram root: $RAMROOT$ram_note"
 
 	local loopback_exe="${SCRIBE_LOOPBACK_EXE:-}"
-	if [[ -n "$loopback_exe" && -e "$loopback_exe" ]]; then
+	if [[ -n "${SCRIBE_LOOPBACK_SOURCE:-}" ]]; then
+		echo "  loopback (system-audio capture): available (device: $SCRIBE_LOOPBACK_SOURCE)"
+	elif [[ -d "/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver" ]]; then
+		echo "  loopback (system-audio capture): available (BlackHole 2ch driver installed; used automatically with --teams)"
+	elif [[ -n "$loopback_exe" && -e "$loopback_exe" ]]; then
 		echo "  loopback (remote-participant capture): available ($loopback_exe)"
+	elif [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]]; then
+		echo "  loopback (system-audio capture): not available -- install BlackHole (brew install blackhole-2ch) or set SCRIBE_LOOPBACK_SOURCE; falls back to mic-only"
 	else
 		echo "  loopback (remote-participant capture): not available -- set SCRIBE_LOOPBACK_EXE (see scribe-loopback-setup.sh); falls back to mic-only"
 	fi

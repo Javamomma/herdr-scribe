@@ -258,3 +258,12 @@
 # the user temp dir (transcript TEXT may touch disk until stop; audio never
 # does). For a true RAM-only transcript root:
 #   export SCRIBE_RAMROOT="$(bash scribe-ramdisk-macos.sh)"
+
+# macOS system-audio loopback: name of a virtual input device that the
+# host's output is routed into (e.g. "BlackHole 2ch" — install with
+#   brew install blackhole-2ch
+# then play audio through a Multi-Output Device that includes it). With
+# --teams, this device becomes the [them] stream; when unset but the
+# BlackHole driver is installed it is used automatically. Entirely
+# optional — no loopback means mic-only, exactly as before.
+# export SCRIBE_LOOPBACK_SOURCE=""
