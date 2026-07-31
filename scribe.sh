@@ -476,7 +476,11 @@ start() {
 	if [[ -z "$capture_cmd" ]]; then
 		capture_cmd="$(compose_capture "$id")"
 	fi
-	nohup bash -c "$capture_cmd" >/dev/null 2>&1 &
+	# Capture stderr goes to a log in the meeting dir (dies with the
+	# meeting): a capture pipeline that exits at launch — no mic permission,
+	# wrong device, missing binary — must be diagnosable, not silent.
+	# `status` surfaces it when the pipeline is no longer running.
+	nohup bash -c "$capture_cmd" >/dev/null 2>"$dir/capture.log" &
 	echo "$!" > "$dir/capture.pid"
 
 	echo "$id"
@@ -484,11 +488,27 @@ start() {
 
 status() {
 	local id
-	if id="$(current_id)"; then
-		echo "$id"
-	else
+	if ! id="$(current_id)"; then
 		echo "none"
+		return 0
 	fi
+	echo "$id"
+	# Diagnose a dead capture pipeline (stdout stays machine-parseable:
+	# diagnostics go to stderr). A 0-byte transcript with a live meeting is
+	# almost always this.
+	local dir pid
+	dir="$(ram_dir "$id")"
+	pid="$(cat "$dir/capture.pid" 2>/dev/null || true)"
+	if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+		echo "warning: capture pipeline is NOT running — the transcript will not grow" >&2
+		if [[ -s "$dir/capture.log" ]]; then
+			echo "capture errors (last 5 lines of $dir/capture.log):" >&2
+			tail -5 "$dir/capture.log" >&2
+		else
+			echo "no capture errors were logged; run 'bash scribe.sh --doctor' and check mic permission" >&2
+		fi
+	fi
+	return 0
 }
 
 abort() {

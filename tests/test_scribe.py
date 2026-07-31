@@ -298,7 +298,7 @@ def test_no_recording_ram_dir_contains_only_text_files(tmp_path):
     ram_dir = tmp_path / "ram" / "scribe" / meeting_id
     assert ram_dir.is_dir()
 
-    allowed_names = {"transcript.md", "meta"}
+    allowed_names = {"transcript.md", "meta", "capture.log", "hotwords.txt"}
     for f in ram_dir.rglob("*"):
         if f.is_file():
             assert f.name in allowed_names or f.suffix == ".pid", (
@@ -2533,3 +2533,35 @@ def test_ramdisk_helper_has_usage_and_refuses_nonmac_gracefully():
     )
     assert result.returncode == 0
     assert "SCRIBE_RAMROOT" in result.stderr + result.stdout
+
+
+# --- capture-failure diagnosability ---
+
+def test_dead_capture_pipeline_is_logged_and_surfaced_by_status(tmp_path):
+    """A capture pipeline that dies at launch (no mic permission, bad
+    device) must leave its stderr in capture.log and make `status` warn —
+    a silent 0-byte transcript is undebuggable."""
+    env = scribe_env(
+        tmp_path, SCRIBE_CAPTURE_CMD="echo mic-permission-denied >&2; exit 1"
+    )
+    started = run(["start", "--consent", "one-party"], env=env)
+    meeting_id = started.stdout.strip()
+    log = tmp_path / "ram" / "scribe" / meeting_id / "capture.log"
+    # The redirect creates the file empty at spawn; wait for CONTENT.
+    assert wait_for(lambda: log.exists() and "mic-permission-denied" in log.read_text())
+
+    status = run(["status"], env=env)
+    assert status.stdout.strip() == meeting_id      # stdout stays parseable
+    assert "NOT running" in status.stderr
+    assert "mic-permission-denied" in status.stderr
+    run(["abort"], env=env)
+
+
+def test_live_capture_pipeline_status_stays_quiet(tmp_path):
+    env = scribe_env(tmp_path, SCRIBE_CAPTURE_CMD="sleep 60")
+    started = run(["start", "--consent", "one-party"], env=env)
+    meeting_id = started.stdout.strip()
+    status = run(["status"], env=env)
+    assert status.stdout.strip() == meeting_id
+    assert "NOT running" not in status.stderr
+    run(["abort"], env=env)
