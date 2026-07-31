@@ -488,15 +488,34 @@ render_analyst_out() {
 		fi
 	} > "$tmp"
 	mv -f "$tmp" "$out"
+	# Record how much of the deep file this render consumed (see
+	# render_if_deep_updated for why this is a byte count, not an mtime).
+	transcript_size "$out.deep" > "$out.deepsize" 2>/dev/null || true
 	return 0
 }
 
 # On quiet ticks the brief must NOT be rewritten (the pane would flicker) —
 # unless a deep block landed since the last render, which must surface even
-# in a silent meeting.
+# in a silent meeting. Staleness is tracked by the deep file's byte count
+# recorded at render time — an mtime comparison (-nt) is second-granular on
+# some bash/filesystem combinations and misses a block that lands within
+# the same second as the previous render.
+rendered_deep_size() {
+	local out="${1:?}" val=""
+	if [[ -f "$out.deepsize" ]]; then
+		val="$(cat "$out.deepsize" 2>/dev/null || true)"
+	fi
+	echo "${val:-0}"
+}
+
 render_if_deep_updated() {
 	local out="${1:?}"
-	if [[ -s "$out.deep" ]] && [[ ! -e "$out" || "$out.deep" -nt "$out" ]]; then
+	if [[ ! -s "$out.deep" ]]; then
+		return 0
+	fi
+	local current
+	current="$(transcript_size "$out.deep")"
+	if [[ ! -e "$out" || "$current" != "$(rendered_deep_size "$out")" ]]; then
 		render_analyst_out "$out"
 	fi
 	return 0
