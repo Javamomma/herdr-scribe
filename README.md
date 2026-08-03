@@ -2,9 +2,11 @@
 
 Live, **no-recording** meeting transcription for [herdr](https://herdr.dev) — the terminal multiplexer for coding agents.
 
-Your mic (and, optionally, remote participants on a video call) stream straight through a local speech-to-text model into a live transcript pane and a rolling "what's happening now" analyst pane. **No audio file is ever written** — audio lives only in an in-memory pipe and is destroyed when the meeting ends. On stop, scribe writes the transcript and generates a plain meeting note (attendees, decisions, action items).
+![scribe mid-meeting: live transcript pane on the left, rolling analyst brief on the right](docs/hero.png)
 
-> Status: in development. See `docs/EXTRACTION-BRIEF.md` for the build plan.
+*A meeting in progress: live `[me]`/`[them]` captions on the left, the analyst's rolling brief on the right — and no audio file anywhere.*
+
+Your mic (and, optionally, remote participants on a video call) stream straight through a local speech-to-text model into a live transcript pane and a rolling "what's happening now" analyst pane. **No audio file is ever written** — audio lives only in an in-memory pipe and is destroyed when the meeting ends. On stop, scribe writes the transcript and generates a plain meeting note (attendees, decisions, action items).
 
 ## Why
 
@@ -38,7 +40,7 @@ Meeting recorders create a file you then have to store, protect, and delete. scr
 ## Install
 
 ```
-herdr plugin install <owner>/herdr-scribe
+herdr plugin install Javamomma/herdr-scribe
 ```
 
 This drops `start` / `stop` / `status` / `abort` actions and a transcript +
@@ -49,10 +51,10 @@ surface.
 
 ### 1. Install
 
-From the marketplace / GitHub:
+From GitHub:
 
 ```
-herdr plugin install <owner>/herdr-scribe
+herdr plugin install Javamomma/herdr-scribe
 ```
 
 or for development, clone and link your working copy:
