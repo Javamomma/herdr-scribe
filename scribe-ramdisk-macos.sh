@@ -25,16 +25,21 @@ usage() {
 	echo "  creates a RAM disk and prints its mount point; point SCRIBE_RAMROOT at it" >&2
 }
 
+# --help must work (and exit 0) on any platform — the platform refusal
+# below only applies to actually creating/inspecting a RAM disk.
+case "${1:-}" in
+	-h|--help)
+		usage
+		exit 0
+		;;
+esac
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
 	echo "scribe-ramdisk-macos.sh: warning: this helper is macOS-only (on Linux use /dev/shm, which scribe already defaults to)" >&2
 	exit 1
 fi
 
 case "${1:-}" in
-	-h|--help)
-		usage
-		exit 0
-		;;
 	--status)
 		if mount | grep -q " $MOUNTPOINT "; then
 			echo "$MOUNTPOINT"
