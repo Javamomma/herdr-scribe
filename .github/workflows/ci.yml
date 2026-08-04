@@ -18,4 +18,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
+      # The capture-composition tests assert ffmpeg-dependent behavior;
+      # GitHub's macOS runners don't ship ffmpeg (ubuntu's do).
+      - if: runner.os == 'macOS'
+        run: brew install ffmpeg
       - run: python3 -m pytest tests/ -q
