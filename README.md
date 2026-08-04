@@ -1,5 +1,8 @@
 # herdr-scribe
 
+[![CI](https://github.com/Javamomma/herdr-scribe/actions/workflows/ci.yml/badge.svg)](https://github.com/Javamomma/herdr-scribe/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Live, **no-recording** meeting transcription for [herdr](https://herdr.dev) — the terminal multiplexer for coding agents.
 
 ![scribe during a meeting: transcript lines streaming into the left pane, the analyst brief filling in on the right](docs/scribe-demo.gif)
