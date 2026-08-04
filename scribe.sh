@@ -282,9 +282,9 @@ doctor() {
 	echo ""
 
 	echo "  capture backend: $(capture_backend) (SCRIBE_CAPTURE_BACKEND=${SCRIBE_CAPTURE_BACKEND:-auto})"
-	local ram_note=""
+	local ram_note="" tmp_dir="${TMPDIR:-/tmp}"
 	case "$RAMROOT" in
-		"${TMPDIR:-/tmp}"|"${TMPDIR%/}"|/tmp)
+		"$tmp_dir"|"${tmp_dir%/}"|/tmp)
 			ram_note=" -- NOT RAM-backed (no tmpfs on this host); see scribe-ramdisk-macos.sh"
 			;;
 	esac
