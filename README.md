@@ -2,9 +2,9 @@
 
 Live, **no-recording** meeting transcription for [herdr](https://herdr.dev) — the terminal multiplexer for coding agents.
 
-![scribe mid-meeting: live transcript pane on the left, rolling analyst brief on the right](docs/hero.png)
+![scribe during a meeting: transcript lines streaming into the left pane, the analyst brief filling in on the right](docs/scribe-demo.gif)
 
-*A meeting in progress: live `[me]`/`[them]` captions on the left, the analyst's rolling brief on the right — and no audio file anywhere.*
+*A meeting as it happens: live `[me]`/`[them]` captions stream in on the left, the analyst's rolling brief lands on the right — and no audio file anywhere. ([still version](docs/hero.png))*
 
 Your mic (and, optionally, remote participants on a video call) stream straight through a local speech-to-text model into a live transcript pane and a rolling "what's happening now" analyst pane. **No audio file is ever written** — audio lives only in an in-memory pipe and is destroyed when the meeting ends. On stop, scribe writes the transcript and generates a plain meeting note (attendees, decisions, action items).
 
