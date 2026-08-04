@@ -1,0 +1,11 @@
+# denylist.example — template for scripts/denylist.local (gitignored, NEVER
+# commit the real one: the list itself is exactly what must stay private).
+#
+# Sourced by sanitization-gate.sh as shell. Both variables are single
+# grep -E (ERE) patterns, terms joined with '|'.
+#
+# HARD: unambiguous personal/org identifiers — any hit fails the gate.
+# SOFT: words worth a human look but too common to hard-fail on.
+
+HARD='your-name|your-employer|client-codename|internal-project\.com|/mnt/c/users/yourlogin'
+SOFT='\bconfidential\b|\binternal.only\b'

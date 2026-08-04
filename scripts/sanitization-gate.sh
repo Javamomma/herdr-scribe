@@ -3,25 +3,39 @@
 # is made public. Greps the whole tree for personal/organization identifiers
 # that must never appear in the published plugin.
 #
+# The identifier lists live OUTSIDE this script, in an untracked local file
+# (scripts/denylist.local, gitignored) — publishing the denylist would leak
+# exactly the identifiers it exists to keep private. Copy
+# scripts/denylist.example to scripts/denylist.local and fill in your terms.
+#
 # HARD list  -> any hit fails the gate (exit 1). Unambiguous identifiers.
 # SOFT list  -> hits are printed as warnings for human judgment (exit unaffected).
 #              These are words that shouldn't appear in a generic transcription
 #              tool but are common enough to false-positive in prose.
-#
-# The gate excludes .git/ and this script itself (which necessarily contains the
-# denylist terms). Extend HARD/SOFT as you think of more identifiers.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 SELF="scripts/sanitization-gate.sh"
 
-HARD='<redacted -- identifier denylist now lives untracked in scripts/denylist.local; see denylist.example>'
-SOFT='\bprivilege|\bmatter\b|\bvault\b|litigation|retention|/ingest|potx|records.management'
+DENYLIST="${SCRIBE_DENYLIST_FILE:-scripts/denylist.local}"
+if [ ! -f "$DENYLIST" ]; then
+  echo "gate: no denylist at $DENYLIST" >&2
+  echo "gate: copy scripts/denylist.example there and fill in your identifiers" >&2
+  exit 2
+fi
+HARD="" SOFT=""
+# shellcheck source=/dev/null
+. "$DENYLIST"
+if [ -z "$HARD" ]; then
+  echo "gate: $DENYLIST sets no HARD pattern" >&2
+  exit 2
+fi
 
-# Build a file list (tracked files if in git, else everything), excluding .git and self.
+# Build a file list (tracked files if in git, else everything), excluding .git,
+# this script, and the local denylist itself.
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  mapfile -t FILES < <(git ls-files | grep -vF "$SELF")
+  mapfile -t FILES < <(git ls-files | grep -vF -e "$SELF" -e "$DENYLIST")
 else
-  mapfile -t FILES < <(find . -type f -not -path './.git/*' -not -path "./$SELF")
+  mapfile -t FILES < <(find . -type f -not -path './.git/*' -not -path "./$SELF" -not -path "./$DENYLIST")
 fi
 [ "${#FILES[@]}" -eq 0 ] && { echo "gate: no files to scan"; exit 0; }
 
@@ -35,7 +49,11 @@ echo "  (clean)"
 
 echo ""
 echo "== SOFT list (review — not a failure) =="
-grep -rInE -- "$SOFT" "${FILES[@]}" || echo "  (clean)"
+if [ -n "$SOFT" ]; then
+  grep -rInE -- "$SOFT" "${FILES[@]}" || echo "  (clean)"
+else
+  echo "  (no SOFT pattern set)"
+fi
 
 echo ""
 echo "PASS: no hard-denylist identifiers. Human-review the SOFT hits (if any) before flipping public."

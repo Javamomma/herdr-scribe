@@ -1,6 +1,10 @@
 # Local config / secrets — never commit the real ones (ship .example templates)
 scribe.conf
 glossary.txt
+scripts/denylist.local
+
+# Session-local memory
+.remember/
 
 # Python
 __pycache__/
