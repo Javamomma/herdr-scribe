@@ -149,6 +149,10 @@ refuses to run again until the current one is `stop`ped or `abort`ed.
 
 ### 5. What happens on `stop`
 
+![the on-stop meeting note: attendees, decisions, and an owner-attributed action-items table](docs/meeting-note.png)
+
+*The note `stop` leaves behind: attendees, decisions, and an owner-attributed action-items table — generated from the transcript, no audio involved.*
+
 `stop` runs a fixed sequence, each step fail-safe so a downstream failure
 can never lose the meeting:
 
