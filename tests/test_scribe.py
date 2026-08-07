@@ -2476,6 +2476,105 @@ def test_pane_all_branch_dispatches_all_queued(tmp_path):
     assert wait_for(lambda: calls.exists() and len(calls.read_text().splitlines()) == 2)
 
 
+# §4h bounded auto-refresh: builds land minutes after stop, so the pane's
+# rows read 'building…' at open; while that marker is on screen the prompt
+# times out and re-renders instead of blocking forever.
+
+def test_pane_refresh_default_fractional_and_zero(monkeypatch):
+    monkeypatch.delenv("SCRIBE_ARTIFACTS_PANE_REFRESH", raising=False)
+    assert artlib.pane_refresh_seconds() == 15.0
+    monkeypatch.setenv("SCRIBE_ARTIFACTS_PANE_REFRESH", "0.5")
+    assert artlib.pane_refresh_seconds() == 0.5
+    monkeypatch.setenv("SCRIBE_ARTIFACTS_PANE_REFRESH", "0")
+    assert artlib.pane_refresh_seconds() == 0.0
+
+
+def test_pane_refresh_malformed_falls_back_with_warning(monkeypatch, capsys):
+    for bad in ("abc", "-3", "nan", "inf"):
+        monkeypatch.setenv("SCRIBE_ARTIFACTS_PANE_REFRESH", bad)
+        assert artlib.pane_refresh_seconds() == 15.0
+        assert "SCRIBE_ARTIFACTS_PANE_REFRESH" in capsys.readouterr().err
+
+
+# A 'built' row with no matching run-log entry renders as 'building…' (a
+# dispatched build that has not landed); a queued-only view never shows it.
+PENDING_ROW = "1\tbuilt\tsummary\ts\ta\talpha\texplicit\t/n.md"
+QUEUED_ROW = "2\tover-cap\tmemo\ts\ta\tbeta\texplicit\t/n.md"
+
+
+def drive_pane(env, settle):
+    """Start the pane on a live pipe and send NOTHING for `settle` seconds,
+    so any re-render inside that window is timeout-driven, not input-driven.
+    Note whether the process is still alive at the end of the window (a
+    refresh timeout mistaken for EOF would have exited it), then send quit
+    and collect the output. Every wait is bounded so a regression (a hot
+    loop, a timeout treated as EOF) fails the test instead of hanging the
+    suite."""
+    proc = subprocess.Popen(
+        ["python3", ARTIFACTS_CLI, "pane", "m1"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env={**os.environ, **env},
+    )
+    try:
+        time.sleep(settle)
+        alive = proc.poll() is None
+        if alive:
+            proc.stdin.write("quit\n")
+            proc.stdin.flush()
+        out, _ = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    return proc.returncode, out, alive
+
+
+def test_pane_pending_row_auto_refreshes_and_still_quits(tmp_path):
+    """With a pending row and a short interval the view must re-render more
+    than once with no input at all, and quit must still work afterward."""
+    write_sidecar_rows(tmp_path, "m1", [PENDING_ROW, QUEUED_ROW])
+    env = artifacts_env(tmp_path, SCRIBE_ARTIFACTS_PANE_REFRESH="0.05")
+    rc, out, alive = drive_pane(env, settle=0.6)
+    assert alive, "pane exited on its own — refresh timeout mistaken for EOF"
+    assert rc == 0
+    assert out.count("Artifacts for meeting m1") >= 2, out
+
+
+def test_pane_no_pending_rows_never_auto_refreshes(tmp_path):
+    """A queued-only view cannot change on its own, so even a very short
+    interval must leave the prompt a plain blocking read: one render."""
+    write_sidecar_rows(tmp_path, "m1", [QUEUED_ROW])
+    env = artifacts_env(tmp_path, SCRIBE_ARTIFACTS_PANE_REFRESH="0.05")
+    rc, out, alive = drive_pane(env, settle=0.6)
+    assert alive
+    assert rc == 0
+    assert out.count("Artifacts for meeting m1") == 1, out
+
+
+def test_pane_refresh_zero_restores_blocking_prompt(tmp_path):
+    """'0' is the documented disable value: even a pending row (the one
+    condition that turns the refresh on) must not re-render the view."""
+    write_sidecar_rows(tmp_path, "m1", [PENDING_ROW])
+    env = artifacts_env(tmp_path, SCRIBE_ARTIFACTS_PANE_REFRESH="0")
+    rc, out, alive = drive_pane(env, settle=0.6)
+    assert alive
+    assert rc == 0
+    assert out.count("Artifacts for meeting m1") == 1, out
+
+
+def test_pane_eof_with_pending_and_refresh_exits_zero(tmp_path):
+    """A closed pane is EOF and must exit 0 even while the timed wait is
+    active — EOF and timeout must never be conflated."""
+    write_sidecar_rows(tmp_path, "m1", [PENDING_ROW])
+    merged = {**os.environ,
+              **artifacts_env(tmp_path, SCRIBE_ARTIFACTS_PANE_REFRESH="0.05")}
+    result = subprocess.run(
+        ["python3", ARTIFACTS_CLI, "pane", "m1"],
+        input="", capture_output=True, text=True, timeout=10, env=merged,
+    )
+    assert result.returncode == 0
+
+
 # meeting resolution + --all
 
 def test_ambiguous_meeting_is_error_naming_matches(tmp_path):

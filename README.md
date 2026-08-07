@@ -222,7 +222,14 @@ bash scribe.sh artifacts --all           # bounded cross-meeting summary
 Drafts are local files under `SCRIBE_ARTIFACT_OUT_DIR`, back-linked into the
 note, each with an open review task — nothing is ever sent anywhere. The
 review surface makes zero model calls. Inside tmux, `stop` also opens an
-interactive review pane (`SCRIBE_REVIEW_PANE=0` to disable).
+interactive review pane (`SCRIBE_REVIEW_PANE=0` to disable). Builds land a
+few minutes after `stop`, so while any row still reads `building…` the pane
+re-renders itself every `SCRIBE_ARTIFACTS_PANE_REFRESH` seconds (default 15,
+fractional ok; `0` disables the refresh and the prompt just blocks) — once
+everything has landed it stops polling. Naming a meeting that has no record
+anywhere (a typo'd id, say) is a hard error (exit 3) that lists the meetings
+that do have records; only the no-argument default falls back to the
+log-derived view for meetings that predate the sidecar.
 
 ### 9. Optional bridges
 

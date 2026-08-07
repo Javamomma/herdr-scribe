@@ -40,6 +40,11 @@ BUILT_DISPOSITIONS = ("built", "approved")
 
 RUN_LOG_EVENTS = ("built", "build-failed")
 
+# The exact text render_view shows for a build that was dispatched but has
+# not landed in the run log yet. Defined once: the review pane keys its
+# auto-refresh off this marker appearing in the rendered view (§4h).
+BUILD_PENDING_LABEL = "building…"
+
 SIDECAR_COLUMNS = 8
 
 # Everything Python's str.splitlines() splits on (minus \r\n which is covered
@@ -139,6 +144,33 @@ def parse_cap():
         file=sys.stderr,
     )
     return 6
+
+
+def pane_refresh_seconds():
+    """SCRIBE_ARTIFACTS_PANE_REFRESH: how many seconds the review pane's
+    prompt waits before re-rendering, while the view still shows a build
+    that has not landed (§4h). Default 15; fractional values are fine.
+    '0' disables auto-refresh entirely — the prompt blocks exactly as it
+    did before the refresh existed. A malformed or negative value falls
+    back to the default WITH a stderr warning (same convention as
+    parse_cap): the operator asked for *some* refresh cadence, so silently
+    losing it is the wrong direction."""
+    raw = os.environ.get("SCRIBE_ARTIFACTS_PANE_REFRESH", "")
+    if raw.strip() == "":
+        return 15.0
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    # NaN fails the >= 0 comparison; infinity would be a nonsense timeout.
+    if value is not None and value >= 0 and value != float("inf"):
+        return value
+    print(
+        f"scribe-artifacts: warning: SCRIBE_ARTIFACTS_PANE_REFRESH={raw!r} "
+        f"is not a non-negative number of seconds; using the default (15)",
+        file=sys.stderr,
+    )
+    return 15.0
 
 
 def enabled_types():
@@ -635,7 +667,7 @@ def approve(meeting, ids, out=sys.stdout, err=sys.stderr):
 def _built_row_status(cand):
     outcome = last_outcome(cand.note_path, cand.type, cand.topic)
     if outcome is None:
-        return "building…", ""
+        return BUILD_PENDING_LABEL, ""
     if outcome["event"] == "build-failed":
         return f"FAILED: {outcome['detail'] or 'see builder logs'}", ""
     review = task_status(outcome["artifact_path"]) or "no review task"

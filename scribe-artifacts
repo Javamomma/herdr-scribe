@@ -18,7 +18,9 @@ Exit codes: 0 ok · 1 operational failure · 2 bad id / unresolvable request ·
 3 explicitly named meeting with no record anywhere.
 """
 
+import io
 import os
+import select
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -107,29 +109,71 @@ def cmd_mark(argv):
     return 0
 
 
+def _render_pane_view(meeting):
+    """Render the review view and report whether it still shows a build
+    that has not landed. Captured once so the same text is both printed
+    and inspected for the pending marker — one render, not two."""
+    buf = io.StringIO()
+    lib.render_view(meeting, out=buf)
+    text = buf.getvalue()
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    return lib.BUILD_PENDING_LABEL in text
+
+
+def _read_pane_line(timeout):
+    """Prompt once and read one line. Returns the line, or None when the
+    refresh timeout expired with nothing typed. Raises EOFError when stdin
+    is closed (pane gone). The two can never be conflated: a timeout is
+    select reporting stdin NOT readable; EOF is stdin readable but
+    delivering zero bytes — mixing them up would either turn a closed pane
+    into a hot re-render loop or make every refresh interval kill the
+    pane."""
+    sys.stdout.write("artifacts> ")
+    sys.stdout.flush()
+    if timeout is not None:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not ready:
+            sys.stdout.write("\n")  # leave the stale prompt on its own line
+            return None
+    line = sys.stdin.readline()
+    if line == "":
+        raise EOFError
+    return line
+
+
 def cmd_pane(meeting_query):
     """Interactive review pane (§4h): a pure read-and-prompt loop.
       - zero model calls (this whole process makes none);
       - EOF on stdin (pane closed) exits 0;
       - unknown input re-prompts, never exits or spins;
       - input is never word-split by a shell or glob-expanded.
-    Builds land minutes after stop, so rows may read 'building…' at first —
-    type 'refresh' to re-render."""
+    Builds land minutes after stop, so rows may read 'building…' at first.
+    While that marker is in the rendered view, the prompt waits at most
+    SCRIBE_ARTIFACTS_PANE_REFRESH seconds (default 15) and re-renders on
+    timeout; once nothing is pending it blocks plainly — a view with no
+    build in flight cannot change on its own, so re-rendering it on a
+    timer would be pure churn. '0' disables the refresh and restores the
+    original always-blocking prompt."""
     try:
         meeting = lib.resolve_meeting(meeting_query)
     except lib.ArtifactsError as exc:
         print(f"scribe-artifacts: {exc}", file=sys.stderr)
         return 0  # purely additive: the pane must never fail anything upstream
 
-    lib.render_view(meeting)
+    refresh = lib.pane_refresh_seconds()
+    pending = _render_pane_view(meeting)
     print("\ncommands: approve <id>... | all | refresh | quit")
     while True:
         try:
-            line = input("artifacts> ")
+            line = _read_pane_line(refresh if (pending and refresh > 0) else None)
         except EOFError:
             return 0  # pane closed
         except KeyboardInterrupt:
             return 0
+        if line is None:  # refresh timeout — a detached build may have landed
+            pending = _render_pane_view(meeting)
+            continue
         words = line.strip().split()
         if not words:
             continue
@@ -137,7 +181,7 @@ def cmd_pane(meeting_query):
         if verb in ("quit", "q", "exit"):
             return 0
         if verb == "refresh":
-            lib.render_view(meeting)
+            pending = _render_pane_view(meeting)
             continue
         if verb == "all":
             try:

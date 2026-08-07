@@ -240,6 +240,11 @@
 # `scribe.sh artifacts` CLI hint is printed either way).
 # export SCRIBE_REVIEW_PANE="1"
 
+# Seconds between the review pane's automatic re-renders while a build is
+# still landing (fractional ok). "0" disables the auto-refresh entirely —
+# the prompt blocks until you type something, as it always did.
+# export SCRIBE_ARTIFACTS_PANE_REFRESH="15"
+
 # Bound on `scribe.sh artifacts --all` (the bound is stated in the output).
 # export SCRIBE_ARTIFACTS_ALL_LIMIT="20"
 
