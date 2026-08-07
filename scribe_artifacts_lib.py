@@ -63,6 +63,13 @@ class AmbiguousMeetingError(ArtifactsError):
     pass
 
 
+class UnknownMeetingError(ArtifactsError):
+    """An EXPLICITLY named meeting matches nothing on record — no sidecar
+    and no run-log trace. The CLI maps this to its own exit code: silently
+    falling through to the §4i log-derived view would render some OTHER
+    meeting's builds under the operator's typo."""
+
+
 def sanitize_field(value):
     """Make a value safe to embed as one TSV field: every character our
     reader would treat as a field or record separator becomes a space."""
@@ -433,11 +440,34 @@ def last_meeting_id():
         return None
 
 
+def run_log_meetings():
+    """Meeting ids the run log knows about, derived from its note paths
+    (`stop` classifies `<out-dir>/<meeting>.note.md`, so the basename carries
+    the id). This is what lets an explicit id for a pre-sidecar meeting keep
+    reaching the §4i reconstruction path after resolve_meeting started
+    rejecting ids that match nothing at all."""
+    suffix = ".note.md"
+    ids = set()
+    for entry in read_run_log():
+        base = os.path.basename(entry["note_path"])
+        if base.endswith(suffix) and len(base) > len(suffix):
+            ids.add(base[: -len(suffix)])
+    return ids
+
+
 def resolve_meeting(query):
     """Resolve a meeting reference to an id. Ambiguity is an ERROR that
-    names every match — never a silent pick-the-newest (§6.4). An unmatched
-    query resolves to itself (the §4i no-record/reconstruction paths handle
-    it downstream)."""
+    names every match — never a silent pick-the-newest (§6.4).
+
+    An EXPLICIT query that matches no sidecar meeting resolves to itself
+    ONLY while something on record still knows it — a sidecar file at its
+    exact path, or a run-log note (see run_log_meetings) — so the §4i
+    no-record/reconstruction paths keep working for genuinely pre-sidecar
+    meetings. A query nothing knows raises UnknownMeetingError instead:
+    left to resolve to itself, the reconstruction fallback would render the
+    run log's latest builds under the operator's typo rather than saying
+    the id matched nothing. The default/latest path (query None) never
+    raises this — reconstruction is exactly what it exists for."""
     meetings = known_meetings()
     if query is None:
         last = last_meeting_id()
@@ -455,7 +485,26 @@ def resolve_meeting(query):
         )
     if matches:
         return matches[0]
-    return query
+    # os.path.lexists covers a sidecar known_meetings could not list (an
+    # unreadable artifacts dir); substring matching against run-log ids
+    # mirrors the sidecar matching above, but the query is returned verbatim
+    # either way — reconstruction picks and names its own source group.
+    if os.path.lexists(sidecar_path(query)):
+        return query
+    logged = run_log_meetings()
+    if query in logged or any(query in m for m in logged):
+        return query
+    recorded = sorted(set(meetings) | logged)
+    if recorded:
+        raise UnknownMeetingError(
+            f"meeting '{query}' matches nothing on record — no sidecar and "
+            f"no run-log entry knows it. Meetings with records: "
+            f"{', '.join(recorded)}"
+        )
+    raise UnknownMeetingError(
+        f"meeting '{query}' matches nothing on record — no sidecar and no "
+        f"run-log entry knows it (no meetings have records here yet)"
+    )
 
 
 # --- build dispatch (NO model call happens in this process) --------------

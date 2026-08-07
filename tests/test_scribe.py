@@ -2306,13 +2306,15 @@ def test_mark_preserves_file_mode(tmp_path):
 # §4i back-compat reconstruction
 
 def test_absent_sidecar_reconstructs_from_log_with_lids(tmp_path, monkeypatch):
+    """An explicit id the run log knows (its note is `newer.note.md`) still
+    reaches the §4i reconstruction path even with no sidecar anywhere."""
     monkeypatch.setenv("SCRIBE_OUTPUT_DIR", str(tmp_path / "out"))
     note_old = make_note(tmp_path, "older.note.md")
     note_new = make_note(tmp_path, "newer.note.md")
     artlib.append_run_log("built", str(note_old), "memo", "old-topic", "/x/old.md")
     artlib.append_run_log("built", str(note_new), "summary", "s1", "/x/s1.md")
     artlib.append_run_log("built", str(note_new), "memo", "s2", "/x/s2.md")
-    result = run_artifacts(["pre-sidecar-meeting"], env=artifacts_env(tmp_path))
+    result = run_artifacts(["newer"], env=artifacts_env(tmp_path))
     assert result.returncode == 0
     out = result.stdout
     assert "RECONSTRUCTED" in out
@@ -2347,11 +2349,62 @@ def test_unreadable_sidecar_reports_not_reconstructs(tmp_path):
     assert "RECONSTRUCTED" not in result.stdout
 
 
-def test_no_record_message_when_nothing_anywhere(tmp_path):
+def test_explicit_id_with_no_records_anywhere_errors(tmp_path):
+    """An explicit id on a machine with zero records of any kind must fail
+    cleanly with the dedicated exit code, not fall through to reconstruction
+    (which would print a misleading 'no record' view at exit 0)."""
     (tmp_path / "out").mkdir(parents=True)
     result = run_artifacts(["typo-meeting"], env=artifacts_env(tmp_path))
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "typo-meeting" in result.stderr
+    assert "no meetings have records" in result.stderr
+
+
+def test_explicit_unknown_id_errors_naming_recorded_meetings(tmp_path):
+    """An explicitly supplied id that matches no sidecar and no run-log
+    entry must error on stderr — naming the bad id and every meeting that
+    DOES have a record — with exit code 3, dedicated so scripts can tell
+    'the id named nothing' from a bad candidate id (2) or an operational
+    failure (1). Nothing may reach stdout: the old fall-through rendered
+    the run log's latest builds under the typo'd id."""
+    write_sidecar_rows(tmp_path, "20260101-standup", [])
+    write_sidecar_rows(tmp_path, "20260102-retro", [])
+    result = run_artifacts(["totally-bogus-id"], env=artifacts_env(tmp_path))
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "totally-bogus-id" in result.stderr
+    assert "20260101-standup" in result.stderr
+    assert "20260102-retro" in result.stderr
+
+
+def test_explicit_unknown_id_same_error_on_approve_paths(tmp_path):
+    write_sidecar_rows(tmp_path, "20260101-standup", [])
+    for extra in (["--approve", "1"], ["--approve-all"]):
+        result = run_artifacts(["ghost-id", *extra], env=artifacts_env(tmp_path))
+        assert result.returncode == 3
+        assert result.stdout == ""
+        assert "ghost-id" in result.stderr
+
+
+def test_default_path_with_no_sidecars_still_reconstructs(tmp_path, monkeypatch):
+    """Regression guard: the no-argument default/latest path must be
+    untouched by the explicit-id check — a machine whose meetings all
+    predate the sidecar must keep getting the §4i log-derived view."""
+    monkeypatch.setenv("SCRIBE_OUTPUT_DIR", str(tmp_path / "out"))
+    note = make_note(tmp_path)
+    artlib.append_run_log("built", str(note), "summary", "alpha", "/x/a.md")
+    (tmp_path / "out" / ".last-meeting").write_text("m1")
+    result = run_artifacts([], env=artifacts_env(tmp_path))
     assert result.returncode == 0
-    assert "No record for 'typo-meeting'" in result.stdout
+    assert "RECONSTRUCTED" in result.stdout
+    assert "/x/a.md" in result.stdout
+
+
+def test_resolve_meeting_unknown_explicit_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCRIBE_OUTPUT_DIR", str(tmp_path / "out"))
+    with pytest.raises(artlib.UnknownMeetingError):
+        artlib.resolve_meeting("ghost")
 
 
 # §4h pane
