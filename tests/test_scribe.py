@@ -552,16 +552,25 @@ def test_start_wires_compose_capture_by_default(tmp_path):
         "SCRIBE_RAMROOT": str(tmp_path / "ram"),
         "SCRIBE_OUTPUT_DIR": str(tmp_path / "out"),
         # Deliberately no SCRIBE_CAPTURE_CMD: exercise the real wiring.
-        # No real mic/parec is required for this to spawn+exit quickly since
-        # a nonexistent capture tool just fails inside the backgrounded
-        # subshell without affecting start()'s own exit code.
+        # BUT point ffmpeg at a nonexistent binary: on a fully-provisioned
+        # host (real ffmpeg + granted mic permission) the composed pipeline
+        # otherwise captures the REAL microphone and outlives the test run —
+        # three leaked pipelines from a 2026-08-04 run held the mic for 16
+        # days. A missing ffmpeg fails inside the backgrounded subshell
+        # without affecting start()'s own exit code, which is all this test
+        # asserts on.
+        "SCRIBE_FFMPEG_BIN": str(tmp_path / "no-such-ffmpeg"),
     }
     result = run(["start", "--consent", "one-party", "--topic", "Weekly Sync"], env=env)
-    assert result.returncode == 0
-    meeting_id = result.stdout.strip()
-    ram_dir = tmp_path / "ram" / "scribe" / meeting_id
-    assert (ram_dir / "transcript.md").is_file()
-    assert (ram_dir / "capture.pid").is_file()
+    try:
+        assert result.returncode == 0
+        meeting_id = result.stdout.strip()
+        ram_dir = tmp_path / "ram" / "scribe" / meeting_id
+        assert (ram_dir / "transcript.md").is_file()
+        assert (ram_dir / "capture.pid").is_file()
+    finally:
+        # Always tear the meeting down so no capture process survives the test.
+        run(["abort"], env=env)
 
 
 # Task 5: scribe-analyst.sh (delta loop, stubbed LLM)
